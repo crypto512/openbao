@@ -836,6 +836,12 @@ type CreationParameters struct {
 
 	// The explicit SKID to use; especially useful for cross-signing.
 	SKID []byte
+
+	// Custom X.509 extensions to add to the certificate.
+	// These extensions are added to the certificate template's ExtraExtensions field.
+	// Useful for adding complex extensions that cannot be represented via OtherSANs,
+	// such as hardware module names or other ASN.1 structures.
+	ExtraExtensions []pkix.Extension
 }
 
 type CreationBundle struct {

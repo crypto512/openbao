@@ -11,8 +11,10 @@ import (
 type ACMEIdentifierType string
 
 const (
-	ACMEDNSIdentifier ACMEIdentifierType = "dns"
-	ACMEIPIdentifier  ACMEIdentifierType = "ip"
+	ACMEDNSIdentifier                ACMEIdentifierType = "dns"
+	ACMEIPIdentifier                 ACMEIdentifierType = "ip"
+	ACMEPermanentIdentifier          ACMEIdentifierType = "permanent-identifier"
+	ACMEHardwareModuleIdentifier     ACMEIdentifierType = "hardware-module"
 )
 
 type ACMEIdentifier struct {
@@ -92,9 +94,10 @@ const (
 type ACMEChallengeType string
 
 const (
-	ACMEHTTPChallenge ACMEChallengeType = "http-01"
-	ACMEDNSChallenge  ACMEChallengeType = "dns-01"
-	ACMEALPNChallenge ACMEChallengeType = "tls-alpn-01"
+	ACMEHTTPChallenge         ACMEChallengeType = "http-01"
+	ACMEDNSChallenge          ACMEChallengeType = "dns-01"
+	ACMEALPNChallenge         ACMEChallengeType = "tls-alpn-01"
+	ACMEDeviceAttestChallenge ACMEChallengeType = "device-attest-01"
 )
 
 type ACMEChallengeStatusType string
@@ -155,6 +158,10 @@ type ACMEAuthorization struct {
 
 	Challenges []*ACMEChallenge `json:"challenges"`
 	Wildcard   bool             `json:"wildcard"`
+
+	// RoleName is stored for device attestation validation
+	// Not exposed in network marshaling
+	RoleName string `json:"role_name,omitempty"`
 }
 
 func (aa *ACMEAuthorization) GetExpires() (time.Time, error) {

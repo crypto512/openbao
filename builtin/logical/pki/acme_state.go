@@ -198,6 +198,10 @@ type acmeOrder struct {
 	CertificateExpiry       time.Time           `json:"cert-expiry"`
 	// The actual issuer UUID that issued the certificate, blank if an order exists but no certificate was issued.
 	IssuerId issuerID `json:"issuer-id"`
+	// Device attestation data (if device-attest-01 challenge was used)
+	PermanentIdentifier  string `json:"permanent-identifier,omitempty"`
+	HardwareModuleName   string `json:"hardware-module-name,omitempty"`
+	AttestationFormat    string `json:"attestation-format,omitempty"`
 }
 
 func (o acmeOrder) getIdentifierDNSValues() []string {

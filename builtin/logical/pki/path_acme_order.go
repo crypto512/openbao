@@ -258,7 +258,12 @@ func (b *backend) acmeFinalizeOrderHandler(ac *acmeContext, _ *logical.Request, 
 		return nil, err
 	}
 
-	signedCertBundle, issuerId, err := issueCertFromCsr(ac, csr)
+	// Extract device attestation data from order (if device-attest-01 challenge was used)
+	if err = extractAttestationDataFromOrder(ac, uc, order); err != nil {
+		return nil, fmt.Errorf("failed to extract attestation data: %w", err)
+	}
+
+	signedCertBundle, issuerId, err := issueCertFromCsr(ac, csr, order)
 	if err != nil {
 		return nil, err
 	}
@@ -367,6 +372,29 @@ func validateCsrMatchesOrder(csr *x509.CertificateRequest, order *acmeOrder) err
 	orderDNSIdentifiers := strutil.RemoveDuplicates(order.getIdentifierDNSValues(), true)
 	orderIPIdentifiers := removeDuplicatesAndSortIps(order.getIdentifierIPValues())
 
+	// Check if this is a device attestation order (has permanent-identifier or hardware-module)
+	hasDeviceAttestationIdentifier := false
+	for _, identifier := range order.Identifiers {
+		if identifier.Type == ACMEPermanentIdentifier || identifier.Type == ACMEHardwareModuleIdentifier {
+			hasDeviceAttestationIdentifier = true
+			break
+		}
+	}
+
+	// Per draft-acme-device-attest-07, orders with device attestation identifiers
+	// don't require DNS/IP identifiers in the order itself. The DNS names come from
+	// the CSR's SubjectAltName field and are bound to the device via attestation.
+	if hasDeviceAttestationIdentifier {
+		// For device attestation orders, we only require that the CSR has valid identifiers
+		// We don't enforce that they match order identifiers since the order only has permanent-identifier
+		if len(csrDNSIdentifiers) == 0 && len(csrIPIdentifiers) == 0 {
+			return fmt.Errorf("%w: CSR must include at least one DNS or IP identifier for device attestation", ErrBadCSR)
+		}
+		// Device attestation validation successful - CSR has identifiers and device was attested
+		return nil
+	}
+
+	// Standard ACME validation (non-device-attestation)
 	if len(orderDNSIdentifiers) == 0 && len(orderIPIdentifiers) == 0 {
 		return fmt.Errorf("%w: order did not include any identifiers", ErrServerInternal)
 	}
@@ -415,6 +443,15 @@ func (b *backend) validateIdentifiersAgainstRole(role *roleEntry, identifiers []
 				return fmt.Errorf("%w: role (%s) does not allow IP sans, so cannot issue certificate for %v",
 					ErrRejectedIdentifier, role.Name, identifier.OriginalValue)
 			}
+		case ACMEPermanentIdentifier, ACMEHardwareModuleIdentifier:
+			// Device attestation identifiers - validate against role's device attestation policy
+			// These identifiers are only allowed if the role has allow_device_attestation enabled
+			if !role.AllowDeviceAttestation {
+				return fmt.Errorf("%w: role (%s) does not allow device attestation, so cannot issue certificate for %v identifier %v",
+					ErrRejectedIdentifier, role.Name, identifier.Type, identifier.OriginalValue)
+			}
+			// The actual permanent identifier value is validated during attestation verification,
+			// not during order creation
 		default:
 			return fmt.Errorf("unknown type of identifier: %v for %v", identifier.Type, identifier.OriginalValue)
 		}
@@ -437,6 +474,46 @@ func getIdentifiersFromCSR(csr *x509.CertificateRequest) ([]string, []net.IP) {
 	}
 
 	return strutil.RemoveDuplicates(dnsIdentifiers, true), removeDuplicatesAndSortIps(ipIdentifiers)
+}
+
+// extractAttestationDataFromOrder extracts device attestation data from an order's authorizations
+func extractAttestationDataFromOrder(ac *acmeContext, uc *jwsCtx, order *acmeOrder) error {
+	// Check if order already has attestation data
+	if order.PermanentIdentifier != "" {
+		return nil // Already populated
+	}
+
+	// Load all authorizations to find device-attest-01 challenges
+	for _, authId := range order.AuthorizationIds {
+		authz, err := ac.getAcmeState().LoadAuthorization(ac, uc, authId)
+		if err != nil {
+			return fmt.Errorf("failed to load authorization %s: %w", authId, err)
+		}
+
+		// Check each challenge for device attestation data
+		for _, challenge := range authz.Challenges {
+			if challenge == nil {
+				continue
+			}
+
+			// If this is a valid device-attest-01 challenge, extract attestation data
+			if challenge.Type == ACMEDeviceAttestChallenge && challenge.Status == ACMEChallengeValid {
+				if permID, ok := challenge.ChallengeFields["permanentIdentifier"].(string); ok && permID != "" {
+					order.PermanentIdentifier = permID
+				}
+				if hwModule, ok := challenge.ChallengeFields["hardwareModuleName"].(string); ok && hwModule != "" {
+					order.HardwareModuleName = hwModule
+				}
+				if format, ok := challenge.ChallengeFields["attestationFormat"].(string); ok && format != "" {
+					order.AttestationFormat = format
+				}
+				// Found attestation data, no need to check other challenges
+				return nil
+			}
+		}
+	}
+
+	return nil
 }
 
 func removeDuplicatesAndSortIps(ipIdentifiers []net.IP) []net.IP {
@@ -503,7 +580,7 @@ func maybeAugmentReqDataWithSuitableCN(ac *acmeContext, csr *x509.CertificateReq
 	}
 }
 
-func issueCertFromCsr(ac *acmeContext, csr *x509.CertificateRequest) (*certutil.ParsedCertBundle, issuerID, error) {
+func issueCertFromCsr(ac *acmeContext, csr *x509.CertificateRequest, order *acmeOrder) (*certutil.ParsedCertBundle, issuerID, error) {
 	pemBlock := &pem.Block{
 		Type:    "CERTIFICATE REQUEST",
 		Headers: nil,
@@ -516,6 +593,14 @@ func issueCertFromCsr(ac *acmeContext, csr *x509.CertificateRequest) (*certutil.
 			"csr": pemCsr,
 		},
 		Schema: getCsrSignVerbatimSchemaFields(),
+	}
+
+	// If device attestation was used, add the permanent identifier for certificate issuance
+	if order.PermanentIdentifier != "" {
+		data.Raw["permanent_identifier"] = order.PermanentIdentifier
+	}
+	if order.HardwareModuleName != "" {
+		data.Raw["hardware_module_name"] = order.HardwareModuleName
 	}
 
 	// XXX: Usability hack: by default, minimalist roles have require_cn=true,
@@ -748,7 +833,7 @@ func (b *backend) acmeNewOrderHandler(ac *acmeContext, _ *logical.Request, _ *fr
 	var authorizations []*ACMEAuthorization
 	var authorizationIds []string
 	for _, identifier := range identifiers {
-		authz, err := generateAuthorization(account, identifier)
+		authz, err := generateAuthorization(account, identifier, ac.role.Name)
 		if err != nil {
 			return nil, fmt.Errorf("error generating authorizations: %w", err)
 		}
@@ -848,17 +933,22 @@ func buildOrderUrl(acmeCtx *acmeContext, orderId string) string {
 	return acmeCtx.baseUrl.JoinPath("order", orderId).String()
 }
 
-func generateAuthorization(acct *acmeAccount, identifier *ACMEIdentifier) (*ACMEAuthorization, error) {
+func generateAuthorization(acct *acmeAccount, identifier *ACMEIdentifier, roleName string) (*ACMEAuthorization, error) {
 	authId := genUuid()
 
 	// Certain challenges have certain restrictions: DNS challenges cannot
 	// be used to validate IP addresses, and only DNS challenges can be used
 	// to validate wildcards.
+	// Device attestation challenges are used for permanent-identifier and
+	// hardware-module identifier types per draft-acme-device-attest-07
 	allowedChallenges := []ACMEChallengeType{ACMEHTTPChallenge, ACMEDNSChallenge, ACMEALPNChallenge}
 	if identifier.Type == ACMEIPIdentifier {
 		allowedChallenges = []ACMEChallengeType{ACMEHTTPChallenge}
 	} else if identifier.IsWildcard {
 		allowedChallenges = []ACMEChallengeType{ACMEDNSChallenge}
+	} else if identifier.Type == ACMEPermanentIdentifier || identifier.Type == ACMEHardwareModuleIdentifier {
+		// Device attestation is the only challenge type for these identifiers
+		allowedChallenges = []ACMEChallengeType{ACMEDeviceAttestChallenge}
 	}
 
 	var challenges []*ACMEChallenge
@@ -879,6 +969,14 @@ func generateAuthorization(acct *acmeAccount, identifier *ACMEIdentifier) (*ACME
 		challenges = append(challenges, challenge)
 	}
 
+	// Debug logging
+	if len(challenges) == 0 {
+		fmt.Printf("WARNING: generateAuthorization created 0 challenges for identifier type=%s, value=%s\n", identifier.Type, identifier.Value)
+		fmt.Printf("  allowedChallenges had %d types\n", len(allowedChallenges))
+	} else {
+		fmt.Printf("DEBUG: generateAuthorization created %d challenges for identifier type=%s\n", len(challenges), identifier.Type)
+	}
+
 	return &ACMEAuthorization{
 		Id:         authId,
 		AccountId:  acct.KeyId,
@@ -887,6 +985,7 @@ func generateAuthorization(acct *acmeAccount, identifier *ACMEIdentifier) (*ACME
 		Expires:    "", // only populated when it switches to valid.
 		Challenges: challenges,
 		Wildcard:   identifier.IsWildcard,
+		RoleName:   roleName,
 	}, nil
 }
 
@@ -1004,6 +1103,24 @@ func parseOrderIdentifiers(data map[string]interface{}) ([]*ACMEIdentifier, erro
 			// > [RFC5890] are properly encoded.
 			if identifier.Value != converted {
 				return nil, fmt.Errorf("value argument (%s) failed IDNA round-tripping to ASCII: %w", valueStr, ErrMalformed)
+			}
+		case string(ACMEPermanentIdentifier):
+			// Per draft-acme-device-attest-07 Section 4.1:
+			// The permanent-identifier is used with device attestation challenges
+			// to bind the certificate to a specific device rather than a domain name.
+			identifier.Type = ACMEPermanentIdentifier
+			// The value is opaque and client-defined, minimal validation needed
+			if len(valueStr) > 255 {
+				return nil, fmt.Errorf("value argument (%s) for permanent-identifier exceeds maximum length of 255: %w", valueStr, ErrMalformed)
+			}
+		case string(ACMEHardwareModuleIdentifier):
+			// Per draft-acme-device-attest-07 Section 4.1:
+			// The hardware-module identifier is used for hardware security modules
+			// and contains the module serial number and type.
+			identifier.Type = ACMEHardwareModuleIdentifier
+			// The value is opaque and client-defined, minimal validation needed
+			if len(valueStr) > 255 {
+				return nil, fmt.Errorf("value argument (%s) for hardware-module exceeds maximum length of 255: %w", valueStr, ErrMalformed)
 			}
 		default:
 			return nil, fmt.Errorf("unsupported identifier type %s: %w", typeStr, ErrUnsupportedIdentifier)

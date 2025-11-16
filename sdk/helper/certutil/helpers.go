@@ -944,6 +944,11 @@ func createCertificate(data *CreationBundle, randReader io.Reader, privateKeyGen
 		return nil, errutil.InternalError{Err: fmt.Errorf("error marshaling other SANs: %w", err).Error()}
 	}
 
+	// Add custom extensions from parameters
+	if len(data.Params.ExtraExtensions) > 0 {
+		certTemplate.ExtraExtensions = append(certTemplate.ExtraExtensions, data.Params.ExtraExtensions...)
+	}
+
 	// Add this before calling addKeyUsages
 	if data.SigningBundle == nil {
 		certTemplate.IsCA = true
@@ -1419,6 +1424,11 @@ func signCertificate(data *CreationBundle, randReader io.Reader) (*ParsedCertBun
 
 	if err := HandleOtherSANs(certTemplate, data.Params.OtherSANs); err != nil {
 		return nil, errutil.InternalError{Err: fmt.Errorf("error marshaling other SANs: %w", err).Error()}
+	}
+
+	// Add custom extensions from parameters
+	if len(data.Params.ExtraExtensions) > 0 {
+		certTemplate.ExtraExtensions = append(certTemplate.ExtraExtensions, data.Params.ExtraExtensions...)
 	}
 
 	AddPolicyIdentifiers(data, certTemplate)

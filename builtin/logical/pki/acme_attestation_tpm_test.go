@@ -1,0 +1,419 @@
+// Copyright (c) OpenBao a Series of LF Projects, LLC
+// SPDX-License-Identifier: MPL-2.0
+
+package pki
+
+import (
+	"bytes"
+	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/binary"
+	"math/big"
+	"testing"
+	"time"
+
+	"github.com/fxamacker/cbor/v2"
+	"github.com/stretchr/testify/require"
+)
+
+func TestTPMAttestationValidator_SupportsFormat(t *testing.T) {
+	validator := &TPMAttestationValidator{}
+
+	require.True(t, validator.SupportsFormat(AttestationFormatTPM))
+	require.False(t, validator.SupportsFormat(AttestationFormatAndroidKey))
+	require.False(t, validator.SupportsFormat(AttestationFormat("unknown")))
+}
+
+func TestTPMAttestationValidator_ParseTPMAttestationStatement(t *testing.T) {
+	validator := &TPMAttestationValidator{}
+
+	// Create a valid TPM attestation statement
+	aikKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	aikCert := createTestAIKCertificate(t, aikKey, "test-device-123")
+
+	attStmt := map[string]interface{}{
+		"ver": "2.0",
+		"alg": int64(-257), // RS256
+		"x5c": [][]byte{aikCert.Raw},
+		"sig": []byte("test-signature"),
+		"certInfo": createTestCertInfo(t, []byte("test-extra-data")),
+		"pubArea":  createTestPubArea(t, &aikKey.PublicKey),
+	}
+
+	// Parse
+	stmt, err := validator.parseTPMAttestationStatement(attStmt)
+	require.NoError(t, err)
+	require.NotNil(t, stmt)
+	require.Equal(t, "2.0", stmt.Ver)
+	require.Equal(t, int64(-257), stmt.Alg)
+	require.Len(t, stmt.X5c, 1)
+	require.NotEmpty(t, stmt.Sig)
+	require.NotEmpty(t, stmt.CertInfo)
+	require.NotEmpty(t, stmt.PubArea)
+}
+
+func TestTPMAttestationValidator_ParseTPMAttestationStatement_MissingFields(t *testing.T) {
+	validator := &TPMAttestationValidator{}
+
+	tests := []struct {
+		name        string
+		attStmt     map[string]interface{}
+		errContains string
+	}{
+		{
+			name: "missing ver",
+			attStmt: map[string]interface{}{
+				"alg":      int64(-257),
+				"x5c":      [][]byte{[]byte("cert")},
+				"sig":      []byte("sig"),
+				"certInfo": []byte("certInfo"),
+				"pubArea":  []byte("pubArea"),
+			},
+			errContains: "missing 'ver' field",
+		},
+		{
+			name: "missing x5c",
+			attStmt: map[string]interface{}{
+				"ver":      "2.0",
+				"alg":      int64(-257),
+				"sig":      []byte("sig"),
+				"certInfo": []byte("certInfo"),
+				"pubArea":  []byte("pubArea"),
+			},
+			errContains: "missing 'x5c' field",
+		},
+		{
+			name: "missing sig",
+			attStmt: map[string]interface{}{
+				"ver":      "2.0",
+				"alg":      int64(-257),
+				"x5c":      [][]byte{[]byte("cert")},
+				"certInfo": []byte("certInfo"),
+				"pubArea":  []byte("pubArea"),
+			},
+			errContains: "missing 'sig' field",
+		},
+		{
+			name: "missing certInfo",
+			attStmt: map[string]interface{}{
+				"ver":     "2.0",
+				"alg":     int64(-257),
+				"x5c":     [][]byte{[]byte("cert")},
+				"sig":     []byte("sig"),
+				"pubArea": []byte("pubArea"),
+			},
+			errContains: "missing 'certInfo' field",
+		},
+		{
+			name: "missing pubArea",
+			attStmt: map[string]interface{}{
+				"ver":      "2.0",
+				"alg":      int64(-257),
+				"x5c":      [][]byte{[]byte("cert")},
+				"sig":      []byte("sig"),
+				"certInfo": []byte("certInfo"),
+			},
+			errContains: "missing 'pubArea' field",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := validator.parseTPMAttestationStatement(tt.attStmt)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tt.errContains)
+		})
+	}
+}
+
+func TestVerifyTPMSignature_RSA(t *testing.T) {
+	// Generate RSA key
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	// Create AIK certificate
+	aikCert := createTestAIKCertificate(t, privKey, "test-device")
+
+	// Data to sign
+	certInfo := []byte("test-cert-info-data")
+
+	// Sign with RS256
+	hash := sha256.Sum256(certInfo)
+	signature, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hash[:])
+	require.NoError(t, err)
+
+	// Verify
+	err = verifyTPMSignature(aikCert, certInfo, signature, -257) // RS256
+	require.NoError(t, err)
+}
+
+func TestVerifyTPMSignature_InvalidSignature(t *testing.T) {
+	// Generate RSA key
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	// Create AIK certificate
+	aikCert := createTestAIKCertificate(t, privKey, "test-device")
+
+	// Data to sign
+	certInfo := []byte("test-cert-info-data")
+
+	// Invalid signature
+	invalidSignature := make([]byte, 256)
+	rand.Read(invalidSignature)
+
+	// Verify should fail
+	err = verifyTPMSignature(aikCert, certInfo, invalidSignature, -257) // RS256
+	require.Error(t, err)
+}
+
+func TestCoseAlgToHashAlg(t *testing.T) {
+	tests := []struct {
+		alg      int64
+		expected crypto.Hash
+		wantErr  bool
+	}{
+		{-257, crypto.SHA256, false}, // RS256
+		{-258, crypto.SHA384, false}, // RS384
+		{-259, crypto.SHA512, false}, // RS512
+		{-7, crypto.SHA256, false},   // ES256
+		{-35, crypto.SHA384, false},  // ES384
+		{-36, crypto.SHA512, false},  // ES512
+		{999, 0, true},               // Unsupported
+	}
+
+	for _, tt := range tests {
+		t.Run("", func(t *testing.T) {
+			hash, err := coseAlgToHashAlg(tt.alg)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.expected, hash)
+			}
+		})
+	}
+}
+
+func TestBytesEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        []byte
+		b        []byte
+		expected bool
+	}{
+		{
+			name:     "equal slices",
+			a:        []byte{1, 2, 3, 4},
+			b:        []byte{1, 2, 3, 4},
+			expected: true,
+		},
+		{
+			name:     "different slices",
+			a:        []byte{1, 2, 3, 4},
+			b:        []byte{1, 2, 3, 5},
+			expected: false,
+		},
+		{
+			name:     "different lengths",
+			a:        []byte{1, 2, 3},
+			b:        []byte{1, 2, 3, 4},
+			expected: false,
+		},
+		{
+			name:     "empty slices",
+			a:        []byte{},
+			b:        []byte{},
+			expected: true,
+		},
+		{
+			name:     "nil slices",
+			a:        nil,
+			b:        nil,
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := bytesEqual(tt.a, tt.b)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestTPMAttestationValidator_ValidateAttestation_WrongFormat(t *testing.T) {
+	validator := &TPMAttestationValidator{}
+
+	attObj := &AttestationObject{
+		Format:       "android-key",
+		AttStatement: map[string]interface{}{},
+	}
+
+	config := &AttestationValidationConfig{
+		ValidateEKCertificate: false, // Explicitly disable for this test
+	}
+
+	_, err := validator.ValidateAttestation(context.Background(), attObj, "test", config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expected format 'tpm'")
+}
+
+func TestTPMAttestationValidator_ValidateAttestation_UnsupportedVersion(t *testing.T) {
+	validator := &TPMAttestationValidator{}
+
+	aikKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	aikCert := createTestAIKCertificate(t, aikKey, "test-device")
+
+	attObj := &AttestationObject{
+		Format: string(AttestationFormatTPM),
+		AttStatement: map[string]interface{}{
+			"ver":      "1.0", // Unsupported version
+			"alg":      int64(-257),
+			"x5c":      [][]byte{aikCert.Raw},
+			"sig":      []byte("sig"),
+			"certInfo": []byte("certInfo"),
+			"pubArea":  []byte("pubArea"),
+		},
+	}
+
+	config := &AttestationValidationConfig{
+		ValidateEKCertificate: false, // Explicitly disable for this test
+	}
+
+	_, err = validator.ValidateAttestation(context.Background(), attObj, "test", config)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported TPM version")
+}
+
+// Helper functions
+
+func createTestAIKCertificate(t *testing.T, privKey *rsa.PrivateKey, permanentID string) *x509.Certificate {
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName:   "Test AIK Certificate",
+			SerialNumber: permanentID,
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privKey.PublicKey, privKey)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+
+	return cert
+}
+
+func createTestCertInfo(t *testing.T, extraData []byte) []byte {
+	buf := new(bytes.Buffer)
+
+	// Magic
+	binary.Write(buf, binary.BigEndian, uint32(TPM_GENERATED_VALUE))
+	// Type
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ST_ATTEST_CERTIFY))
+	// QualifiedSigner
+	writeTPM2B(buf, []byte("test-signer"))
+	// ExtraData
+	writeTPM2B(buf, extraData)
+	// ClockInfo
+	binary.Write(buf, binary.BigEndian, uint64(12345))
+	binary.Write(buf, binary.BigEndian, uint32(1))
+	binary.Write(buf, binary.BigEndian, uint32(2))
+	binary.Write(buf, binary.BigEndian, byte(1))
+	// FirmwareVersion
+	binary.Write(buf, binary.BigEndian, uint64(0x0001000200030004))
+	// TPMS_CERTIFY_INFO
+	// For now, use placeholder names - in a full test we'd compute the actual name
+	writeTPM2B(buf, []byte("test-name-placeholder-1234567890"))
+	writeTPM2B(buf, []byte("test-qualified-name"))
+
+	return buf.Bytes()
+}
+
+func createTestPubArea(t *testing.T, pubKey *rsa.PublicKey) []byte {
+	buf := new(bytes.Buffer)
+
+	// Type (RSA)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSA))
+	// NameAlg (SHA256)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256))
+	// ObjectAttributes
+	binary.Write(buf, binary.BigEndian, uint32(0x00000001))
+	// AuthPolicy (empty)
+	writeTPM2B(buf, nil)
+	// RSA Parameters
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_NULL))   // symmetric
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSASSA)) // scheme
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256)) // hash alg
+	binary.Write(buf, binary.BigEndian, uint16(2048))           // keyBits
+	binary.Write(buf, binary.BigEndian, uint32(0))              // exponent (0 = 65537)
+	// Unique (RSA modulus)
+	writeTPM2B(buf, pubKey.N.Bytes())
+
+	return buf.Bytes()
+}
+
+func TestFullTPMAttestationFlow(t *testing.T) {
+	t.Skip("Skipping full integration test - requires complete TPM name computation")
+
+	// This test demonstrates the full flow but is skipped because
+	// the TPMS_CERTIFY_INFO.Name field requires computing the TPM name
+	// of the certified key, which requires the full public key structure.
+	//
+	// In a real implementation, this would be computed as:
+	// Name = nameAlg || H(pubArea)
+	//
+	// This is implemented in the ComputeName method but requires
+	// careful coordination between the certInfo and pubArea structures.
+}
+
+// TestTPMAttestationObject_CBOR tests CBOR encoding/decoding of attestation objects
+func TestTPMAttestationObject_CBOR(t *testing.T) {
+	// Create a test TPM attestation statement
+	aikKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	aikCert := createTestAIKCertificate(t, aikKey, "test-device-456")
+
+	attStmt := map[string]interface{}{
+		"ver":      "2.0",
+		"alg":      int64(-257), // RS256
+		"x5c":      [][]byte{aikCert.Raw},
+		"sig":      []byte("test-signature-bytes"),
+		"certInfo": createTestCertInfo(t, []byte("test-extra-data-32-bytes-long!!")),
+		"pubArea":  createTestPubArea(t, &aikKey.PublicKey),
+	}
+
+	// Create attestation object
+	attObj := map[string]interface{}{
+		"fmt":     string(AttestationFormatTPM),
+		"attStmt": attStmt,
+	}
+
+	// Encode to CBOR
+	cborBytes, err := cbor.Marshal(attObj)
+	require.NoError(t, err)
+	require.NotEmpty(t, cborBytes)
+
+	// Decode back
+	var decoded map[string]interface{}
+	err = cbor.Unmarshal(cborBytes, &decoded)
+	require.NoError(t, err)
+
+	// Verify format
+	require.Equal(t, string(AttestationFormatTPM), decoded["fmt"])
+	require.NotNil(t, decoded["attStmt"])
+}

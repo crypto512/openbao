@@ -470,6 +470,21 @@ func (ace *ACMEChallengeEngine) _verifyChallenge(sc *storageContext, id string, 
 			err = fmt.Errorf("%w: error validating tls-alpn-01 challenge %v: %s", ErrIncorrectResponse, id, err.Error())
 			return ace._verifyChallengeRetry(sc, cv, authzPath, authz, challenge, err, id)
 		}
+	case ACMEDeviceAttestChallenge:
+		// Device attestation supports permanent-identifier and hardware-module identifier types
+		if authz.Identifier.Type != ACMEPermanentIdentifier && authz.Identifier.Type != ACMEHardwareModuleIdentifier {
+			err = fmt.Errorf("unsupported identifier type for authorization %v/%v in challenge %v: %v (device-attest-01 requires permanent-identifier or hardware-module)", cv.Account, cv.Authorization, id, authz.Identifier.Type)
+			return ace._verifyChallengeCleanup(sc, err, id)
+		}
+
+		// Get role name from authorization
+		roleName := authz.RoleName
+
+		valid, _, err = ValidateDeviceAttest01Challenge(sc.Context, sc.Backend, sc.Storage, challenge, cv.Thumbprint, roleName)
+		if err != nil {
+			err = fmt.Errorf("%w: error validating device-attest-01 challenge %v: %v; %v", ErrIncorrectResponse, id, err, ChallengeAttemptFailedMsg)
+			return ace._verifyChallengeRetry(sc, cv, authzPath, authz, challenge, err, id)
+		}
 	default:
 		err = fmt.Errorf("unsupported ACME challenge type %v for challenge %v", cv.ChallengeType, id)
 		return ace._verifyChallengeCleanup(sc, err, id)

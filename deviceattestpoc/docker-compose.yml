@@ -1,0 +1,104 @@
+# Copyright (c) OpenBao a Series of LF Projects, LLC
+# SPDX-License-Identifier: MPL-2.0
+
+# ACME Device Attestation PoC - Docker Compose Configuration
+
+services:
+  # OpenBao Server - Secrets Management and ACME Certificate Authority
+  openbao:
+    image: alpine:3.22
+    container_name: openbao-poc
+    hostname: openbao
+    ports:
+      - "8200:8200"
+    environment:
+      - BAO_DEV_ROOT_TOKEN_ID=root
+      - BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+      - BAO_LOG_LEVEL=debug
+    volumes:
+      - ../bin/bao:/bin/bao:ro
+      - ./scripts:/scripts:ro
+      - openbao-data:/openbao/data
+    command: >
+      sh -c "
+        apk add --no-cache bash curl jq &&
+        bao server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
+      "
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8200/v1/sys/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
+    networks:
+      - attestation-net
+
+  # Initialization Service - Configures OpenBao with PKI and TPM EK roots
+  init:
+    image: alpine:3.22
+    container_name: openbao-init
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      - BAO_ADDR=http://openbao:8200
+      - BAO_TOKEN=root
+    volumes:
+      - ../bin/bao:/bin/bao:ro
+      - ./scripts:/scripts:ro
+    command: >
+      sh -c "
+        apk add --no-cache bash curl jq openssl &&
+        /scripts/init-openbao.sh
+      "
+    networks:
+      - attestation-net
+
+  # gRPC Server - Proxies certificate requests to OpenBao ACME API
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: cert-server
+    hostname: server
+    ports:
+      - "50051:50051"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      - BAO_ADDR=http://openbao:8200
+      - BAO_TOKEN=root
+      - GRPC_PORT=50051
+      - LOG_LEVEL=debug
+    networks:
+      - attestation-net
+
+  # Client - Requests certificates using TPM attestation
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: cert-client
+    hostname: client
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      - SERVER_ADDR=server:50051
+      - CERT_COMMON_NAME=vpn-client-001.example.com
+      - LOG_LEVEL=debug
+    volumes:
+      - client-certs:/certs
+    # Note: No hardware TPM in container - uses simulated attestation mode
+    # In production, would run on bare metal with real TPM device
+    networks:
+      - attestation-net
+
+networks:
+  attestation-net:
+    driver: bridge
+
+volumes:
+  openbao-data:
+  client-certs:

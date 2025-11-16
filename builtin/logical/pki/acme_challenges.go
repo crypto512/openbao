@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/openbao/openbao/sdk/v2/logical"
 )
 
 const (
@@ -500,4 +502,76 @@ func ValidateTLSALPN01Challenge(domain string, token string, thumbprint string, 
 		return false, fmt.Errorf("tls-alpn-01: failed to perform handshake: %w", err)
 	}
 	return true, nil
+}
+
+// ValidateDeviceAttest01Challenge validates a device attestation challenge
+// per draft-acme-device-attest-07
+func ValidateDeviceAttest01Challenge(
+	ctx context.Context,
+	b *backend,
+	s logical.Storage,
+	challenge *ACMEChallenge,
+	thumbprint string,
+	roleName string,
+) (bool, *AttestationResult, error) {
+	// Extract attestation object from challenge fields
+	attObjB64, ok := challenge.ChallengeFields["attObj"].(string)
+	if !ok || attObjB64 == "" {
+		return false, nil, fmt.Errorf("%w: attestation object not found in challenge", ErrMalformed)
+	}
+
+	// Extract token from challenge fields
+	token, ok := challenge.ChallengeFields["token"].(string)
+	if !ok || token == "" {
+		return false, nil, fmt.Errorf("%w: token not found in challenge", ErrMalformed)
+	}
+
+	// Construct key authorization: token || '.' || base64url(JWK thumbprint)
+	keyAuthorization := token + "." + thumbprint
+
+	// Parse attestation object
+	attObj, err := ParseAttestationObject(attObjB64)
+	if err != nil {
+		return false, nil, fmt.Errorf("%w: failed to parse attestation object: %v", ErrBadAttestationStatement, err)
+	}
+
+	// Load attestation validation configuration from role
+	config, err := LoadAttestationValidationConfig(b, s, ctx, roleName)
+	if err != nil {
+		return false, nil, fmt.Errorf("%w: failed to load validation config: %v", ErrServerInternal, err)
+	}
+
+	// Verify attestation format is allowed
+	attestFormat := AttestationFormat(attObj.Format)
+	allowed := false
+	for _, format := range config.RequiredFormats {
+		if format == attestFormat {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return false, nil, fmt.Errorf("%w: attestation format '%s' is not allowed by server policy", ErrRejectedAttestationFormat, attestFormat)
+	}
+
+	// Get validator for attestation format
+	validator, err := GetAttestationValidator(attestFormat)
+	if err != nil {
+		return false, nil, fmt.Errorf("%w: no validator available for format '%s'", ErrUnsupportedAttestationFormat, attestFormat)
+	}
+
+	// Validate attestation
+	result, err := validator.ValidateAttestation(ctx, attObj, keyAuthorization, config)
+	if err != nil {
+		return false, nil, fmt.Errorf("%w: %v", ErrAttestationVerificationFailed, err)
+	}
+
+	// Store attestation data in challenge fields for later use during certificate issuance
+	challenge.ChallengeFields["permanentIdentifier"] = result.PermanentIdentifier
+	challenge.ChallengeFields["attestationFormat"] = string(result.Format)
+	if result.HardwareModuleName != "" {
+		challenge.ChallengeFields["hardwareModuleName"] = result.HardwareModuleName
+	}
+
+	return true, result, nil
 }

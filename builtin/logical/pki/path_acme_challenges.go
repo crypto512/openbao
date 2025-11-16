@@ -83,8 +83,25 @@ func (b *backend) acmeChallengeFetchHandler(acmeCtx *acmeContext, r *logical.Req
 	// > The client indicates to the server that it is ready for the challenge
 	// > validation by sending an empty JSON body ("{}") carried in a POST
 	// > request to the challenge URL (not the authorization URL).
+	//
+	// Exception: device-attest-01 challenges require an attestation object
+	// per draft-acme-device-attest-07
 	if len(data) > 0 {
-		return nil, fmt.Errorf("unexpected request parameters: %w", ErrMalformed)
+		// For device-attest-01, expect attObj field with attestation object
+		if challenge.Type == ACMEDeviceAttestChallenge {
+			attObj, ok := data["attObj"].(string)
+			if !ok || attObj == "" {
+				return nil, fmt.Errorf("device-attest-01 challenge requires 'attObj' field: %w", ErrMalformed)
+			}
+			// Store attestation object in challenge fields for validation
+			if challenge.ChallengeFields == nil {
+				challenge.ChallengeFields = make(map[string]interface{})
+			}
+			challenge.ChallengeFields["attObj"] = attObj
+		} else {
+			// For other challenge types, payload must be empty
+			return nil, fmt.Errorf("unexpected request parameters: %w", ErrMalformed)
+		}
 	}
 
 	// If data was nil, we got a POST-as-GET request, just return current challenge without an accept,

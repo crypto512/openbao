@@ -439,6 +439,32 @@ The value format should be given in UTC format YYYY-MM-ddTHH:MM:SSZ.`,
 			Description: `Reference to the issuer used to sign requests
 serviced by this role.`,
 		},
+
+		// Device attestation fields for ACME
+		"allow_device_attestation": {
+			Type:        framework.TypeBool,
+			Description: `Whether device attestation is allowed for ACME certificate requests.`,
+		},
+		"required_attestation_formats": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: `List of required attestation formats for device attestation.`,
+		},
+		"validate_ek_certificate": {
+			Type:        framework.TypeBool,
+			Description: `Whether to validate the EK certificate chain for TPM attestation.`,
+		},
+		"attestation_policies": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: `List of required policy OIDs in attestation certificates.`,
+		},
+		"allowed_tpm_identifiers": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: `List of allowed TPM permanent identifiers for device attestation.`,
+		},
+		"blocked_tpm_identifiers": {
+			Type:        framework.TypeCommaStringSlice,
+			Description: `List of blocked TPM permanent identifiers for device attestation.`,
+		},
 	}
 
 	return &framework.Path{
@@ -886,6 +912,58 @@ The value format should be given in UTC format YYYY-MM-ddTHH:MM:SSZ.`,
 serviced by this role.`,
 				Default: defaultRef,
 			},
+
+			// Device attestation fields for ACME
+			"allow_device_attestation": {
+				Type:    framework.TypeBool,
+				Default: false,
+				Description: `Whether to allow device attestation for ACME certificate requests.
+When enabled, the role supports the device-attest-01 challenge type defined in
+draft-acme-device-attest. Defaults to false.`,
+			},
+			"required_attestation_formats": {
+				Type:    framework.TypeCommaStringSlice,
+				Default: []string{},
+				Description: `List of required attestation formats for device attestation.
+Supported formats: "tpm" (TPM 2.0), "android-key" (Android Key Attestation),
+"apple" (Apple Device Attestation), "chromeos" (Chrome OS Verified Access).
+If empty and allow_device_attestation is true, all formats are allowed.
+Comma-separated list.`,
+			},
+			"validate_ek_certificate": {
+				Type:    framework.TypeBool,
+				Default: true,
+				Description: `Whether to validate the Endorsement Key (EK) certificate chain
+for TPM attestation. When enabled, the attestation statement's certificate chain
+must validate against configured EK root certificates. Requires EK root certificates
+to be configured via the acme/ek-roots API. Defaults to true for security.
+IMPORTANT: For production use, EK validation should be enabled and EK root certificates
+must be configured. Disabling this weakens the security of device attestation.`,
+			},
+			"attestation_policies": {
+				Type:    framework.TypeCommaStringSlice,
+				Default: []string{},
+				Description: `List of required policy OIDs that must be present in attestation
+certificates. Policies are specified as OID strings (e.g., "1.2.3.4"). The attestation
+certificate must contain all specified policy OIDs. Comma-separated list.`,
+			},
+			"allowed_tpm_identifiers": {
+				Type:    framework.TypeCommaStringSlice,
+				Default: []string{},
+				Description: `List of allowed TPM permanent identifiers for device attestation.
+When non-empty, only TPM devices with permanent identifiers in this list will be allowed
+to obtain certificates. The permanent identifier is extracted from the AIK certificate's
+Subject DN or SAN extension. If empty, all TPMs are allowed (unless blocked).
+Comma-separated list.`,
+			},
+			"blocked_tpm_identifiers": {
+				Type:    framework.TypeCommaStringSlice,
+				Default: []string{},
+				Description: `List of blocked TPM permanent identifiers for device attestation.
+TPM devices with permanent identifiers in this list will be denied certificates regardless
+of other settings. The blocklist is checked before the allowlist. The permanent identifier
+is extracted from the AIK certificate's Subject DN or SAN extension. Comma-separated list.`,
+			},
 		},
 
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -1182,6 +1260,13 @@ func (b *backend) pathRoleCreate(ctx context.Context, req *logical.Request, data
 		NotAfter:                      data.Get("not_after").(string),
 		NotAfterBound:                 data.Get("not_after_bound").(string),
 		Issuer:                        data.Get("issuer_ref").(string),
+		// Device attestation fields for ACME
+		AllowDeviceAttestation:       data.Get("allow_device_attestation").(bool),
+		RequiredAttestationFormats:   data.Get("required_attestation_formats").([]string),
+		ValidateEKCertificate:        data.Get("validate_ek_certificate").(bool),
+		AttestationPolicies:          data.Get("attestation_policies").([]string),
+		AllowedTPMIdentifiers:        data.Get("allowed_tpm_identifiers").([]string),
+		BlockedTPMIdentifiers:        data.Get("blocked_tpm_identifiers").([]string),
 		Name:                          name,
 	}
 
@@ -1435,6 +1520,13 @@ func (b *backend) pathRolePatch(ctx context.Context, req *logical.Request, data 
 		NotAfter:                      data.GetWithExplicitDefault("not_after", oldEntry.NotAfter).(string),
 		NotAfterBound:                 data.GetWithExplicitDefault("not_after_bound", oldEntry.NotAfterBound).(string),
 		Issuer:                        data.GetWithExplicitDefault("issuer_ref", oldEntry.Issuer).(string),
+		// Device attestation fields for ACME
+		AllowDeviceAttestation:       data.GetWithExplicitDefault("allow_device_attestation", oldEntry.AllowDeviceAttestation).(bool),
+		RequiredAttestationFormats:   data.GetWithExplicitDefault("required_attestation_formats", oldEntry.RequiredAttestationFormats).([]string),
+		ValidateEKCertificate:        data.GetWithExplicitDefault("validate_ek_certificate", oldEntry.ValidateEKCertificate).(bool),
+		AttestationPolicies:          data.GetWithExplicitDefault("attestation_policies", oldEntry.AttestationPolicies).([]string),
+		AllowedTPMIdentifiers:        data.GetWithExplicitDefault("allowed_tpm_identifiers", oldEntry.AllowedTPMIdentifiers).([]string),
+		BlockedTPMIdentifiers:        data.GetWithExplicitDefault("blocked_tpm_identifiers", oldEntry.BlockedTPMIdentifiers).([]string),
 	}
 
 	allowedOtherSANsData, wasSet := data.GetOk("allowed_other_sans")
@@ -1682,6 +1774,13 @@ type roleEntry struct {
 	NotAfter                      string        `json:"not_after"`
 	NotAfterBound                 string        `json:"not_after_bound"`
 	Issuer                        string        `json:"issuer"`
+	// Device attestation configuration for ACME
+	AllowDeviceAttestation       bool     `json:"allow_device_attestation"`
+	RequiredAttestationFormats   []string `json:"required_attestation_formats"`
+	ValidateEKCertificate        bool     `json:"validate_ek_certificate"`
+	AttestationPolicies          []string `json:"attestation_policies"`
+	AllowedTPMIdentifiers        []string `json:"allowed_tpm_identifiers"`
+	BlockedTPMIdentifiers        []string `json:"blocked_tpm_identifiers"`
 	// Name is only set when the role has been stored, on the fly roles have a blank name
 	Name string `json:"-"`
 }
@@ -1744,6 +1843,12 @@ func (r *roleEntry) ToResponseData() map[string]interface{} {
 		"not_after":                          r.NotAfter,
 		"not_after_bound":                    r.NotAfterBound,
 		"issuer_ref":                         r.Issuer,
+		"allow_device_attestation":           r.AllowDeviceAttestation,
+		"required_attestation_formats":       r.RequiredAttestationFormats,
+		"validate_ek_certificate":            r.ValidateEKCertificate,
+		"attestation_policies":               r.AttestationPolicies,
+		"allowed_tpm_identifiers":            r.AllowedTPMIdentifiers,
+		"blocked_tpm_identifiers":            r.BlockedTPMIdentifiers,
 	}
 	if r.MaxPathLength != nil {
 		responseData["max_path_length"] = r.MaxPathLength

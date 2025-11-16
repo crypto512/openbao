@@ -1367,6 +1367,57 @@ func generateCreationBundle(b *backend, data *inputBundle, caSign *certutil.CAIn
 		}
 	}
 
+	// Add permanent identifier from device attestation if present
+	// Note: We access Raw directly because permanent_identifier isn't in the schema
+	if permanentID, ok := data.apiData.Raw["permanent_identifier"]; ok && permanentID != nil {
+		permIDStr, isString := permanentID.(string)
+		if isString && permIDStr != "" {
+			// Initialize otherSANs if it's nil
+			if otherSANs == nil {
+				otherSANs = make(map[string][]string)
+			}
+			// Add permanent identifier as otherSAN with OID 1.3.6.1.5.5.7.8.3
+			// The map format is map[oid][]values where values are just the actual values (not type+value)
+			otherSANs["1.3.6.1.5.5.7.8.3"] = []string{permIDStr}
+		}
+	}
+
+	// Prepare extra X.509 extensions for device attestation
+	var extraExtensions []pkix.Extension
+
+	// Add hardware module name from device attestation if present
+	if hwModuleName, ok := data.apiData.GetOk("hardware_module_name"); ok && hwModuleName != nil {
+		hwModuleStr := hwModuleName.(string)
+		if hwModuleStr != "" {
+			// Parse format "oid:hexserial"
+			parts := strings.Split(hwModuleStr, ":")
+			if len(parts) == 2 {
+				// Parse OID (format: "1.2.3.4")
+				oidParts := strings.Split(parts[0], ".")
+				hwTypeOID := make(asn1.ObjectIdentifier, len(oidParts))
+				validOID := true
+				for i, part := range oidParts {
+					val, err := strconv.Atoi(part)
+					if err != nil {
+						validOID = false
+						break
+					}
+					hwTypeOID[i] = val
+				}
+
+				// Parse hex serial
+				hwSerial, err := hex.DecodeString(parts[1])
+				if err == nil && validOID {
+					// Encode the hardware module name extension
+					ext, err := encodeHardwareModuleNameExtension(hwTypeOID, hwSerial)
+					if err == nil {
+						extraExtensions = append(extraExtensions, ext)
+					}
+				}
+			}
+		}
+	}
+
 	// Get and verify any IP SANs
 	ipAddresses := []net.IP{}
 	{
@@ -1569,6 +1620,7 @@ func generateCreationBundle(b *backend, data *inputBundle, caSign *certutil.CAIn
 			NotBeforeDuration:             data.role.NotBeforeDuration,
 			ForceAppendCaChain:            caSign != nil,
 			SKID:                          skid,
+			ExtraExtensions:               extraExtensions,
 		},
 		SigningBundle: caSign,
 		CSR:           csr,

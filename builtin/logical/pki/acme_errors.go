@@ -48,6 +48,12 @@ var (
 	ErrUnsupportedContact      = errors.New("A contact URL for an account used an unsupported protocol scheme")
 	ErrUnsupportedIdentifier   = errors.New("An identifier is of an unsupported type")
 	ErrUserActionRequired      = errors.New("Visit the 'instance' URL and take actions specified there")
+
+	// Device attestation errors (draft-acme-device-attest)
+	ErrBadAttestationStatement     = errors.New("The attestation statement is malformed or invalid")
+	ErrUnsupportedAttestationFormat = errors.New("The attestation format is not supported by the server")
+	ErrRejectedAttestationFormat   = errors.New("The attestation format is not allowed by server policy")
+	ErrAttestationVerificationFailed = errors.New("The attestation statement verification failed")
 )
 
 // Mapping of err->name; see table in RFC 8555 Section 6.7. Errors.
@@ -76,6 +82,12 @@ var errIdMappings = map[error]string{
 	ErrUnsupportedContact:      "unsupportedContact",
 	ErrUnsupportedIdentifier:   "unsupportedIdentifier",
 	ErrUserActionRequired:      "userActionRequired",
+
+	// Device attestation errors (draft-acme-device-attest)
+	ErrBadAttestationStatement:       "badAttestationStatement",
+	ErrUnsupportedAttestationFormat:  "unsupportedAttestationFormat",
+	ErrRejectedAttestationFormat:     "rejectedAttestationFormat",
+	ErrAttestationVerificationFailed: "attestationVerificationFailed",
 }
 
 // Mapping of err->status codes; see table in RFC 8555 Section 6.7. Errors.
@@ -104,6 +116,12 @@ var errCodeMappings = map[error]int{
 	ErrUnsupportedContact:      http.StatusBadRequest,
 	ErrUnsupportedIdentifier:   http.StatusBadRequest,
 	ErrUserActionRequired:      http.StatusUnauthorized,
+
+	// Device attestation errors (draft-acme-device-attest)
+	ErrBadAttestationStatement:       http.StatusBadRequest,
+	ErrUnsupportedAttestationFormat:  http.StatusNotImplemented,
+	ErrRejectedAttestationFormat:     http.StatusForbidden,
+	ErrAttestationVerificationFailed: http.StatusForbidden,
 }
 
 type ErrorResponse struct {

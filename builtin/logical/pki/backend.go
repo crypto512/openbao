@@ -196,6 +196,7 @@ func Backend(conf *logical.BackendConfig) *backend {
 
 			// ACME
 			pathAcmeConfig(&b),
+			pathAttestationConfig(&b),
 			pathAcmeEabList(&b),
 			pathAcmeEabDelete(&b),
 		},
@@ -226,6 +227,7 @@ func Backend(conf *logical.BackendConfig) *backend {
 	acmePaths = append(acmePaths, pathAcmeAuthorization(&b)...)
 	acmePaths = append(acmePaths, pathAcmeRevoke(&b)...)
 	acmePaths = append(acmePaths, pathAcmeNewEab(&b)...) // auth'd API that lives underneath the various /acme paths
+	acmePaths = append(acmePaths, pathAcmeEkRoots(&b)...)
 
 	b.Paths = append(b.Paths, acmePaths...)
 

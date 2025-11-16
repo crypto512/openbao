@@ -1,0 +1,135 @@
+// Copyright (c) OpenBao a Series of LF Projects, LLC
+// SPDX-License-Identifier: MPL-2.0
+
+syntax = "proto3";
+
+package certservice;
+
+option go_package = "github.com/openbao/openbao/deviceattestpoc/proto;certservice";
+
+// CertificateService provides certificate issuance with TPM device attestation
+service CertificateService {
+  // RequestCertificate initiates a certificate request and returns the device attestation challenge
+  rpc RequestCertificate(CertRequest) returns (CertResponse);
+
+  // SubmitAttestation submits the TPM attestation response for validation
+  rpc SubmitAttestation(AttestationSubmit) returns (CertResponse);
+
+  // GetCertificate retrieves the issued certificate if ready
+  rpc GetCertificate(GetCertRequest) returns (CertResponse);
+
+  // EnrollTPM enrolls a TPM device by configuring its root CA and identifier
+  // WARNING: This is a PoC-only endpoint. In production, enrollment MUST be
+  // performed by administrators through secure out-of-band channels, NOT by clients.
+  rpc EnrollTPM(TPMEnrollmentRequest) returns (EnrollmentResponse);
+}
+
+// CertRequest contains the certificate signing request for IPsec VPN
+message CertRequest {
+  // Common name for the certificate (e.g., "vpn-client-12345")
+  string common_name = 1;
+
+  // Subject Alternative Names - IP addresses
+  repeated string san_ips = 2;
+
+  // Subject Alternative Names - DNS names
+  repeated string san_dns = 3;
+
+  // PEM-encoded Certificate Signing Request
+  string csr_pem = 4;
+
+  // Permanent identifier from TPM (serial number or device ID)
+  string permanent_identifier = 5;
+}
+
+// AttestationSubmit contains the TPM attestation object
+message AttestationSubmit {
+  // Order ID from the initial certificate request
+  string order_id = 1;
+
+  // Authorization URL for the challenge
+  string authorization_url = 2;
+
+  // Challenge URL to submit attestation to
+  string challenge_url = 3;
+
+  // Base64url-encoded CBOR attestation object
+  // Format: {fmt: "tpm", attStmt: {ver, alg, x5c, sig, certInfo, pubArea}}
+  string attestation_object = 4;
+}
+
+// GetCertRequest requests the certificate for a finalized order
+message GetCertRequest {
+  // Order ID to retrieve certificate for
+  string order_id = 1;
+}
+
+// CertResponse contains the response for certificate operations
+message CertResponse {
+  // Status of the request: "pending", "ready", "valid", "invalid", "error"
+  string status = 1;
+
+  // Order ID for tracking the certificate request
+  string order_id = 2;
+
+  // Authorization URL containing the challenge
+  string authorization_url = 3;
+
+  // Challenge URL for device-attest-01
+  string challenge_url = 4;
+
+  // Challenge token for building key authorization
+  string challenge_token = 5;
+
+  // Account thumbprint for key authorization (JWK thumbprint)
+  string account_thumbprint = 6;
+
+  // PEM-encoded certificate if status is "valid"
+  string certificate_pem = 7;
+
+  // Certificate chain (intermediate + root) in PEM format
+  repeated string chain_pem = 8;
+
+  // Error message if status is "error"
+  string error = 9;
+
+  // Additional information for debugging
+  string details = 10;
+}
+
+// TPMEnrollmentRequest contains TPM enrollment data sent by the client
+// WARNING: In production, this data MUST be provided by administrators through
+// secure out-of-band channels. This PoC allows clients to send it for demonstration
+// purposes only.
+message TPMEnrollmentRequest {
+  // TPM permanent identifier to allowlist
+  string permanent_identifier = 1;
+
+  // PEM-encoded TPM EK root CA certificate
+  // This is the manufacturer's root certificate that signs the EK certificate chain
+  string ek_root_ca_pem = 2;
+
+  // Name/identifier for the EK root CA (e.g., "intel", "infineon")
+  string ek_root_ca_name = 3;
+
+  // Optional: Description of the TPM device
+  string device_description = 4;
+}
+
+// EnrollmentResponse contains the result of TPM enrollment
+message EnrollmentResponse {
+  // Status: "success" or "error"
+  string status = 1;
+
+  // Error message if status is "error"
+  string error = 2;
+
+  // Confirmation details
+  string details = 3;
+
+  // The enrolled permanent identifier
+  string permanent_identifier = 4;
+
+  // The enrolled EK root CA name
+  string ek_root_ca_name = 5;
+}
