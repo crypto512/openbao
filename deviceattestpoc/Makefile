@@ -1,6 +1,6 @@
 # Makefile for ACME Device Attestation PoC
 
-.PHONY: help build-client build-server clean test run-docker run-server run-client-sim run-client-hw
+.PHONY: help build-client build-server clean test run-docker run-server run-client-sim run-client-hw-iak run-client-hw-ak
 
 help:
 	@echo "ACME Device Attestation PoC - Make targets:"
@@ -9,12 +9,13 @@ help:
 	@echo "  make build-server      - Build server binary"
 	@echo "  make clean            - Clean built binaries"
 	@echo ""
-	@echo "  make run-server       - Start server infrastructure only"
-	@echo "  make run-client-sim   - Run client in SIMULATION mode"
-	@echo "  make run-client-hw    - Run client with HARDWARE TPM (requires sudo)"
+	@echo "  make run-server        - Start server infrastructure only"
+	@echo "  make run-client-sim    - Run client in SIMULATION mode"
+	@echo "  make run-client-hw-iak - Run client with HARDWARE TPM in IAK mode (requires sudo)"
+	@echo "  make run-client-hw-ak  - Run client with HARDWARE TPM in AK mode (requires sudo)"
 	@echo ""
-	@echo "  make run-docker       - Run full PoC in Docker (simulated TPM)"
-	@echo "  make test             - Run full PoC test"
+	@echo "  make run-docker        - Run full PoC in Docker (simulated TPM)"
+	@echo "  make test              - Run full PoC test"
 	@echo ""
 
 # Detect host OS and architecture
@@ -65,16 +66,17 @@ else
 		-e GOOS=$(GOOS) \
 		-e GOARCH=$(GOARCH) \
 		-e CGO_ENABLED=1 \
-		golang:1.25-bullseye \
+		golang:1.25-bookworm \
 		sh -c "apt-get update -qq && apt-get install -y -qq gcc libc6-dev && go mod tidy && go build -o ../bin/tpm-acme-client ."
 endif
 	@echo "✓ Client binary built: bin/tpm-acme-client ($(GOOS)/$(GOARCH))"
 	@echo ""
 	@echo "Usage:"
-	@echo "  ./bin/tpm-acme-client -help                  # Show help"
-	@echo "  ./bin/tpm-acme-client -simulate              # Simulation mode"
+	@echo "  ./bin/tpm-acme-client -help                      # Show help"
+	@echo "  ./bin/tpm-acme-client -simulate                  # Simulation mode"
 ifeq ($(GOOS),linux)
-	@echo "  sudo ./bin/tpm-acme-client                   # Hardware TPM mode"
+	@echo "  sudo ./bin/tpm-acme-client -attest-mode iak      # Hardware TPM (IAK mode)"
+	@echo "  sudo ./bin/tpm-acme-client -attest-mode ak       # Hardware TPM (AK mode)"
 endif
 	@echo ""
 
@@ -113,12 +115,21 @@ run-client-sim: build-client
 	@echo ""
 	@./bin/tpm-acme-client -simulate
 
-# Run standalone client with HARDWARE TPM
-run-client-hw: build-client
-	@echo "Running client with HARDWARE TPM..."
+# Run standalone client with HARDWARE TPM in IAK mode
+run-client-hw-iak: build-client
+	@echo "Running client with HARDWARE TPM in IAK mode..."
 	@echo "Note: This requires sudo for TPM device access"
+	@echo "Mode: Using manufacturer-provisioned IAK certificate"
 	@echo ""
-	@sudo ./bin/tpm-acme-client
+	@sudo ./bin/tpm-acme-client -attest-mode iak
+
+# Run standalone client with HARDWARE TPM in AK mode
+run-client-hw-ak: build-client
+	@echo "Running client with HARDWARE TPM in AK mode..."
+	@echo "Note: This requires sudo for TPM device access"
+	@echo "Mode: Using NewAK with OpenBao-issued IAK certificate"
+	@echo ""
+	@sudo ./bin/tpm-acme-client -attest-mode ak
 
 # Test full PoC
 test:

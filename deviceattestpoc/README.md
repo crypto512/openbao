@@ -1,666 +1,589 @@
-# ACME Device Attestation Proof-of-Concept
+# ACME Device Attestation with TPM 2.0 - Proof of Concept
 
-Real-world demonstration of ACME device attestation using TPM 2.0 for IPsec VPN certificate issuance.
+Real-world demonstration of ACME device attestation using TPM 2.0 hardware-backed cryptography for secure certificate issuance.
 
 ## Overview
 
-This PoC demonstrates:
-- **TPM 2.0 Device Attestation** using `google/go-attestation` library
-- **Hardware or Simulated TPM** auto-detection
-- **gRPC API** for certificate requests with attestation
-- **OpenBao ACME** integration with `device-attest-01` challenge
-- **Permanent Identifier** binding certificates to TPM devices
+This PoC demonstrates hardware-backed device attestation where certificate private keys are generated **inside the TPM** and proven non-exportable through cryptographic attestation. This ensures that private keys never exist in software memory and cannot be extracted from the device.
+
+### Key Features
+
+- **TPM-Protected Certificate Keys**: Private keys generated inside TPM using `CreatePrimary`, never exported
+- **Cryptographic Proof**: TPM2_Certify proves keys are non-exportable with FixedTPM and SensitiveDataOrigin attributes
+- **Two Attestation Modes**:
+  - IAK Mode: Uses manufacturer-provisioned IAK certificates from TPM NVRAM
+  - AK Mode: Creates persistent Attestation Key, receives IAK certificate from OpenBao
+- **ACME Integration**: Full ACME flow with `device-attest-01` challenge type
+- **Simulator Support**: Software simulation for testing without hardware TPM
 
 ## Architecture
 
 ```
-┌─────────────┐       gRPC         ┌─────────────┐      ACME       ┌──────────────┐
-│   Client    │◄──────────────────►│   Server    │◄───────────────►│   OpenBao    │
-│             │  Cert Request      │             │   Orders/       │              │
-│ - TPM Ops   │  Attestation       │ - gRPC      │   Challenges    │ - PKI        │
-│ - CSR Gen   │                    │ - ACME API  │                 │ - ACME       │
-│ - Attest    │                    │ - Proxy     │                 │ - Validation │
-└──────┬──────┘                    └─────────────┘                 └──────────────┘
-       │
-       │ TPM API (Hardware or Simulated)
-       ▼
-┌─────────────┐
-│   TPM 2.0   │
-│             │
-│ /dev/tpmrm0 │
-│ or built-in │
-│  simulation │
-└─────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                         TPM Hardware                               │
+│                                                                    │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────────┐│
+│  │ EK (RSA)     │  │ IAK/AK (RSA) │  │ Certificate Key (RSA)      ││
+│  │ Decrypt Only │  │ Sign         │  │ Sign (TPM-Protected)       ││
+│  │              │  │ Attestation  │  │ Non-Exportable             ││
+│  └──────────────┘  └──────────────┘  └────────────────────────────┘│
+│                                                                    │
+│  Persistent Handles:                                               │
+│  • 0x81010001: Persistent AK (AK mode only)                        │
+│  • 0x81010002: Certificate Key (both modes)                        │
+│  • 0x81010012: IAK Handle (IAK mode, vendor-specific)              │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-## Components
+### Component Flow
 
-### 1. Client (`client/`)
-- **Language**: Go
-- **Dependencies**: go-attestation, gRPC, CBOR
-- **Functions**:
-  - Initialize TPM using go-attestation
-  - Create Attestation Key (AK)
-  - Generate CSR for IPsec VPN certificates
-  - Generate TPM attestation objects (CBOR format)
-  - Submit attestation via gRPC
+```
+┌─────────────┐       gRPC         ┌─────────────┐      ACME       ┌──────────────┐
+│   Client    │◄──────────────────►│   Server    │◄───────────────►│   OpenBao    │
+│             │  Enrollment        │             │   Orders/       │              │
+│ - TPM Init  │  Cert Request      │ - gRPC API  │   Challenges    │ - PKI        │
+│ - CSR (TPM) │  Attestation       │ - ACME      │   Validation    │ - ACME       │
+│ - Certify   │                    │   Proxy     │                 │ - TPM Verify │
+└─────────────┘                    └─────────────┘                 └──────────────┘
+```
 
-### 2. Server (`server/`)
-- **Language**: Go
-- **Dependencies**: gRPC, OpenBao API client
-- **Functions**:
-  - Receive certificate requests via gRPC
-  - Create ACME orders on OpenBao
-  - Extract `device-attest-01` challenges
-  - Forward attestations to OpenBao
-  - Return signed certificates to clients
+## TPM-Protected Certificate Keys
 
-### 3. OpenBao
-- **PKI Backend**: Certificate Authority
-- **ACME Support**: RFC 8555 + draft-acme-device-attest
-- **Device Attestation**: TPM 2.0 validation
-- **Configuration**: Configured with attestation policies and role
+### What Makes This Secure?
 
-## Prerequisites
+Traditional certificate issuance generates private keys in software memory, which can be:
+- Extracted and copied
+- Stolen by malware
+- Exported to other devices
 
-- Docker and Docker Compose
-- OpenBao binary built at `../bin/bao`
+This PoC generates certificate keys **inside the TPM** with these guarantees:
+
+| Property | Meaning | Proof Method |
+|----------|---------|--------------|
+| **FixedTPM** | Key bound to this specific TPM, cannot be exported | TPM2_Certify attestation |
+| **FixedParent** | Key cannot be moved to different parent | TPM2_Certify attestation |
+| **SensitiveDataOrigin** | Key was generated inside TPM (not imported) | TPM2_Certify attestation |
+| **Persistent Storage** | Keys survive reboot at handle 0x81010002 | TPM persistent memory |
+| **CSR Signing** | All signing operations performed inside TPM | TPM2_Sign operations |
+
+### TPM2_Certify Operation
+
+The PoC uses **TPM2_Certify** (not TPM2_Quote):
+
+- **TPM2_Quote**: Attests to PCR values (boot measurements)
+- **TPM2_Certify**: Attests to key attributes (our use case)
+
+TPM2_Certify generates a `TPM_ST_ATTEST_CERTIFY` (0x8017) attestation that:
+1. Cryptographically proves the certificate key's attributes
+2. Binds the certificate key to the IAK/AK
+3. Includes the key authorization hash from ACME challenge
+4. Follows WebAuthn TPM attestation format
+
+## Attestation Modes
+
+### IAK Mode (Manufacturer-Provisioned)
+
+**Use When**: TPM has manufacturer-provisioned IAK certificate in NVRAM
+
+```
+make run-client-hw-iak    # Requires --attest-mode=iak
+```
+
+**Process**:
+1. Read IAK certificate from TPM NVRAM (0x01C00012)
+2. Load IAK key handle (vendor-specific, e.g., 0x81010012)
+3. Create TPM-protected certificate key at 0x81010002
+4. Use TPM2_Certify with IAK to prove key attributes
+5. IAK certificate chains to manufacturer root CA
+
+**Advantages**:
+- ✅ IAK provisioned at factory in secure environment
+- ✅ Certificate chains to well-known manufacturer CA
+- ✅ No additional provisioning step needed
+
+**Requirements**:
+- ❌ Not all TPMs have manufacturer IAK
+- ❌ Certificate validity set by manufacturer (years)
+
+### AK Mode (Locally Created)
+
+**Use When**: No manufacturer IAK available (most common)
+
+```
+make run-client-hw-ak     # Default, or --attest-mode=ak
+```
+
+**Process**:
+1. Create persistent AK at handle 0x81010001 using `CreatePrimary`
+2. Create TPM-protected certificate key at 0x81010002
+3. Send AK public key during enrollment
+4. Receive IAK certificate from OpenBao (365-day validity)
+5. Use TPM2_Certify with AK to prove key attributes
+6. IAK certificate chains to OpenBao PKI root
+
+**Advantages**:
+- ✅ Works with any TPM that has EK certificate
+- ✅ IAK certificate validity controlled by OpenBao
+- ✅ AK persisted at handle 0x81010001 (survives reboot)
+- ✅ Automatic mode if manufacturer IAK not present
+
+**Requirements**:
+- ❌ Requires EK enrollment with OpenBao first
+- ❌ Adds OpenBao PKI root to trust anchors
+
+### Simulator Mode
+
+**Use When**: Testing without hardware TPM
+
+```
+make run-client           # Auto-detects no hardware TPM
+```
+
+**⚠️ Security Warning**:
+- Uses external RSA keys generated with `rsa.GenerateKey()`
+- Private keys exist in software memory
+- Keys exported to PEM files on disk
+- **For testing only** - Not suitable for production
 
 ## Quick Start
 
-### Option A: Unified Standalone Workflow (Recommended)
+### Prerequisites
 
-This workflow uses the same `tpm-acme-client` binary for both simulation and hardware TPM modes.
+- Docker and Docker Compose
+- OpenBao binary at `../bin/bao`
+- For hardware TPM: Linux with `/dev/tpmrm0` or `/dev/tpm0`
 
-#### 1. Build Client Binary
+### Step 1: Build Client
 
 ```bash
 cd deviceattestpoc
 make build-client
 ```
 
-This cross-compiles the client for your host OS (macOS, Linux, etc.).
-
-#### 2. Start Server Infrastructure
+### Step 2: Start Server Infrastructure
 
 ```bash
-# In one terminal
+# Terminal 1
 make run-server
 ```
 
-This starts OpenBao and the gRPC server.
+This starts OpenBao with ACME and the gRPC attestation server.
 
-#### 3. Run Client (Choose Mode)
+### Step 3: Run Client (Choose Mode)
 
-**Simulation Mode** (works anywhere):
+**Simulator Mode** (works anywhere):
 ```bash
-# In another terminal
-./bin/tpm-acme-client -simulate
+# Terminal 2
+make run-client
 ```
 
-**Hardware TPM Mode** (Linux only, requires `/dev/tpm`):
+**Hardware TPM - IAK Mode** (requires manufacturer IAK):
 ```bash
-sudo ./bin/tpm-acme-client
+# Terminal 2
+sudo ./clear_ak.sh              # Clear old keys
+make run-client-hw-iak
 ```
 
-Or use the make targets:
+**Hardware TPM - AK Mode** (works with any TPM):
 ```bash
-make run-client-sim    # Simulation mode
-make run-client-hw     # Hardware TPM mode (sudo required)
+# Terminal 2
+sudo ./clear_ak.sh              # Clear old keys
+make run-client-hw-ak
 ```
 
-#### 4. View Help
+### Expected Output
 
-```bash
-./bin/tpm-acme-client -help
 ```
+═══════════════════════════════════════════════
+Initializing TPM...
+═══════════════════════════════════════════════
+✓ Hardware TPM detected and opened successfully
+✓ Persistent AK created successfully (handle: 0x81010001)
+✓ Certificate key persisted (handle: 0x81010002)
+  Attributes: FixedTPM|FixedParent|SensitiveDataOrigin|UserWithAuth|Sign
+  Security: Private key NEVER leaves TPM, cannot be exported
 
-### Option B: Docker Workflow (Simulation Only)
+═══════════════════════════════════════════════
+Generating Certificate Signing Request...
+═══════════════════════════════════════════════
+✓ CSR signed by TPM (private key never exported)
 
-For quick testing without building binaries:
+═══════════════════════════════════════════════
+Connecting to gRPC server...
+═══════════════════════════════════════════════
+✓ Connected to server: localhost:50051
 
-```bash
-# Start everything in Docker
-docker-compose up --build
-
-# View client logs
-docker-compose logs client
-```
-
-Expected output:
-```
-==============================================
-ACME Device Attestation Client
-==============================================
-Server: server:50051
-TPM Device: /dev/tpmrm0
-Certificate CN: vpn-client-001.example.com
-
-Step 1: Initializing TPM client...
-✓ TPM initialized. Permanent ID: SIM-TPM-A1B2C3D4E5F60708
-
-Step 2: Generating Certificate Signing Request...
-✓ CSR generated
-
-Step 3: Connecting to gRPC server...
-✓ Connected to server
-
-Step 3.5: Enrolling TPM device (PoC demonstration only)...
-
-⚠️  IMPORTANT SECURITY NOTICE:
-   In production, TPM enrollment MUST be performed by administrators
-   through secure out-of-band channels. This PoC allows client-initiated
-   enrollment for demonstration purposes ONLY.
-
+═══════════════════════════════════════════════
+Enrolling TPM with OpenBao...
+═══════════════════════════════════════════════
 ✓ TPM enrolled successfully
-  Permanent ID: SIM-TPM-A1B2C3D4E5F60708
-  EK Root CA: simulated-tpm
+  Permanent ID: TPM-1234567890ABCDEF
+  EK Root CA: intel
+✓ IAK certificate provisioned (AK mode)
 
-Step 4: Requesting certificate with device attestation...
+═══════════════════════════════════════════════
+Requesting certificate...
+═══════════════════════════════════════════════
 ✓ Certificate request initiated
-  Order ID: http://openbao:8200/v1/pki/acme/order/...
-  Challenge URL: http://openbao:8200/v1/pki/acme/challenge/...
-  Challenge Token: abc123...
+  Challenge type: device-attest-01
 
-Step 5: Generating TPM attestation...
-✓ TPM attestation generated (1234 bytes)
+═══════════════════════════════════════════════
+Generating TPM attestation...
+═══════════════════════════════════════════════
+✓ TPM2_Certify successful (WebAuthn TPM attestation format)
+✓ Attestation proves: FixedTPM, SensitiveDataOrigin, non-exportable
 
-Step 6: Submitting attestation to server...
-✓ Attestation submitted successfully
-  Status: valid
+═══════════════════════════════════════════════
+Submitting attestation...
+═══════════════════════════════════════════════
+✓ Attestation validated by OpenBao
 
-Step 7: Retrieving certificate...
+═══════════════════════════════════════════════
+Retrieving certificate...
+═══════════════════════════════════════════════
 ✓ Certificate issued successfully!
-Certificate saved to: /certs/vpn-client.pem
-
-==============================================
-✓ ACME Device Attestation Flow Completed
-==============================================
-
-Summary:
-  • TPM Permanent ID: SIM-TPM-A1B2C3D4E5F60708
-  • Certificate CN: vpn-client-001.example.com
-  • Order ID: http://openbao:8200/v1/pki/acme/order/...
-  • Attestation Status: processing
-
-The device attestation challenge was successfully validated!
-Certificate has been issued and saved to /certs/vpn-client.pem.
-The certificate includes the permanent identifier in the SAN extension.
+  Saved to: ./vpn-client.pem
 ```
 
 ## Detailed Flow
 
-### Phase 1: Initialization (Automatic)
+### Phase 1: TPM Initialization
 
-1. **OpenBao Setup** (`scripts/init-openbao.sh`):
-   - Enable PKI secrets engine at `/pki`
-   - Generate root CA: "OpenBao PoC Root CA"
-   - Configure global attestation settings:
-     - `enabled=true`
-     - `allowed_attestation_formats=["tpm"]`
-     - `validate_ek_certificate=true` (now defaults to true for security)
-   - Create role `ipsec-vpn`:
-     - `allowed_domains=["example.com"]`
-     - `allow_device_attestation=true`
-     - `key_usage=["DigitalSignature", "KeyEncipherment", "KeyAgreement"]`
-     - `ext_key_usage_oids=["1.3.6.1.5.5.7.3.5", "1.3.6.1.5.5.7.3.6"]` (IPsec)
-   - Enable ACME at `/pki/acme/`
+1. **Client opens TPM** (hardware or simulator)
+   - Hardware: `/dev/tpmrm0` or `/dev/tpm0`
+   - Simulator: Built-in software TPM
 
-2. **TPM Setup**:
-   - Client auto-detects hardware TPM at `/dev/tpmrm0` or `/dev/tpm0`
-   - Falls back to built-in simulation mode if no hardware TPM found
-   - Uses `google/go-attestation` library for TPM operations
+2. **Read/Create IAK**:
+   - **IAK Mode**: Read IAK certificate from NVRAM 0x01C00012
+   - **AK Mode**: Create persistent AK at handle 0x81010001
 
-### Phase 2: TPM Enrollment (PoC Only - Admin Task in Production)
+3. **Create TPM-Protected Certificate Key**:
+   - Generate key INSIDE TPM using `CreatePrimary`
+   - Parent: Owner hierarchy
+   - Attributes: FixedTPM, FixedParent, SensitiveDataOrigin, Sign
+   - Persist at handle 0x81010002
+   - Private key **never leaves TPM**
 
-3. **Client Enrollment Request** (⚠️ **PoC ONLY - Admin task in production**):
-   - Extract/generate EK root CA certificate (simulated in PoC)
-   - Send enrollment request via gRPC `EnrollTPM`:
-     ```protobuf
-     EnrollTPM({
-       permanent_identifier: "TPM-A1B2C3D4E5F60708",
-       ek_root_ca_pem: "-----BEGIN CERTIFICATE-----...",
-       ek_root_ca_name: "simulated-tpm",
-       device_description: "Simulated TPM device..."
-     })
-     ```
+### Phase 2: TPM Enrollment
 
-4. **Server Configures OpenBao**:
-   - Configure EK root CA: `POST /pki/config/acme/ek-roots/simulated-tpm`
-   - Update role to enable EK validation and allowlist TPM:
-     - `validate_ek_certificate=true`
-     - `allowed_tpm_identifiers=["TPM-A1B2C3D4E5F60708"]`
+4. **Client sends enrollment request** to server via gRPC:
+   - Permanent ID (from EK certificate)
+   - EK root CA certificate
+   - AK public key (AK mode only)
 
-### Phase 3: Certificate Request (Client-Initiated)
+5. **Server configures OpenBao**:
+   - Add EK root CA to trusted roots
+   - Store permanent ID enrollment
+   - Issue IAK certificate for AK public key (AK mode only)
 
-5. **Client Initialization**:
-   - Open TPM connection via go-attestation
-   - Create Attestation Key (AK) using `tpm.NewAK()`
-   - Extract permanent identifier from TPM (serial or derived)
-   - Generate RSA-2048 key pair for certificate
+### Phase 3: Certificate Request
 
-6. **CSR Generation**:
-   - Create x509 CSR with:
-     - CN: `vpn-client-001.example.com`
-     - SAN DNS: `vpn-client-001.example.com`
-   - Sign CSR with certificate private key
+6. **Generate CSR**:
+   - Create CSR for `vpn-client-001.example.com`
+   - Sign CSR using TPM2_Sign with certificate key (0x81010002)
+   - Private key never exported from TPM
 
-7. **gRPC Certificate Request**:
-   ```protobuf
-   RequestCertificate({
-     common_name: "vpn-client-001.example.com",
-     san_dns: ["vpn-client-001.example.com"],
-     csr_pem: "-----BEGIN CERTIFICATE REQUEST-----...",
-     permanent_identifier: "TPM-A1B2C3D4E5F60708"
-   })
-   ```
+7. **Client sends request** to server:
+   - CSR (PEM format)
+   - Permanent ID
 
-8. **Server Creates ACME Order**:
-   - Create ACME account on OpenBao (if needed)
-   - POST to `/pki/acme/new-order`:
-     ```json
-     {
-       "identifiers": [
-         {
-           "type": "permanent-identifier",
-           "value": "TPM-A1B2C3D4E5F60708"
-         }
-       ]
-     }
-     ```
-   - Extract `device-attest-01` challenge from authorization
-   - Return challenge details to client
+8. **Server creates ACME order** on OpenBao:
+   - Identifier type: `permanent-identifier`
+   - Identifier value: TPM permanent ID
+   - Receives `device-attest-01` challenge
 
-### Phase 4: Attestation (Client Response)
+### Phase 4: Attestation
 
-9. **Generate TPM Attestation**:
-   - Compute key authorization: `{token}.{account_thumbprint}`
-   - Hash key authorization: `SHA256(key_authorization)`
-   - Create `pubArea` (TPMT_PUBLIC) for certificate key
-   - Create `certInfo` (TPMS_ATTEST) with:
-     - `magic`: `0xFF544347` (TPM_GENERATED_VALUE)
-     - `type`: `0x8017` (TPM_ST_ATTEST_CERTIFY)
-     - `extraData`: SHA256 hash of key authorization
-     - `attestedCertify.name`: TPM name of certificate key
-   - Sign `certInfo` with AK private key
-   - Build attestation statement:
-     ```json
-     {
-       "ver": "2.0",
-       "alg": -257,  // RS256
-       "x5c": [<AIK certificate DER>],
-       "sig": <signature over certInfo>,
-       "certInfo": <TPMS_ATTEST bytes>,
-       "pubArea": <TPMT_PUBLIC bytes>
-     }
-     ```
-   - Wrap in attestation object:
-     ```json
-     {
-       "fmt": "tpm",
-       "attStmt": {...}
-     }
-     ```
-   - Encode to CBOR and base64url
+9. **Client generates attestation**:
+   - Compute key authorization: `SHA256(token || '.' || thumbprint)`
+   - Execute **TPM2_Certify**:
+     - Object to certify: Certificate key (0x81010002)
+     - Signing key: IAK or AK
+     - Qualifying data: Key authorization hash
+   - Generates attestation containing:
+     - `certInfo`: TPMS_ATTEST structure (0x8017 CERTIFY)
+     - `pubArea`: Certificate key public structure
+     - `sig`: Signature by IAK/AK
+     - `x5c`: IAK certificate chain
 
-10. **Submit Attestation**:
-   ```protobuf
-   SubmitAttestation({
-     order_id: "http://openbao:8200/v1/pki/acme/order/...",
-     challenge_url: "http://openbao:8200/v1/pki/acme/challenge/...",
-     attestation_object: "<base64url CBOR>"
-   })
-   ```
+10. **Client submits attestation** to server
 
-11. **Server Forwards to OpenBao**:
-   - POST to challenge URL with JWS:
-     ```json
-     {
-       "attObj": "<base64url CBOR attestation object>"
-     }
-     ```
+11. **Server forwards** to OpenBao ACME challenge URL
 
-### Phase 5: Validation (OpenBao)
+### Phase 5: Validation
 
-12. **OpenBao Validates Attestation**:
-    - Decode base64url → CBOR → AttestationObject
-    - Verify format is "tpm"
-    - Parse TPM attestation statement
-    - Verify TPM version is "2.0"
-    - Parse AIK certificate from `x5c[0]`
-    - Validate EK certificate chain (if enabled)
-    - Parse `certInfo` (TPMS_ATTEST):
-      - Verify magic value
-      - Verify type is TPM_ST_ATTEST_CERTIFY
-      - Extract `extraData` (key authorization hash)
-    - Compute expected key authorization hash
-    - **Verify**: `extraData == SHA256(token + '.' + thumbprint)`
-    - Parse `pubArea` (TPMT_PUBLIC)
-    - Verify signature over `certInfo` using AIK public key
-    - Compute TPM name of certified object
-    - **Verify**: `attestedCertify.name == ComputeName(pubArea)`
-    - Extract permanent identifier from AIK certificate
-    - **Verify**: Permanent identifier is in allowlist (if configured)
-    - **Verify**: Permanent identifier is not in blocklist (if configured)
-    - Mark challenge as `valid`
+12. **OpenBao validates attestation**:
+    - ✅ Decode CBOR attestation object
+    - ✅ Parse WebAuthn TPM format
+    - ✅ Verify IAK certificate chains to:
+      - Manufacturer root CA (IAK mode), OR
+      - OpenBao PKI root (AK mode)
+    - ✅ Verify signature over `certInfo` using IAK/AK public key
+    - ✅ Verify `certInfo.extraData` matches key authorization hash
+    - ✅ Verify `certInfo.name` matches SHA-256 hash of `pubArea`
+    - ✅ Verify key attributes: FixedTPM, SensitiveDataOrigin
+    - ✅ Confirm key is TPM-protected and non-exportable
+    - ✅ Mark challenge as `valid`
 
-13. **Order Status**:
-    - All challenges valid → Order status: `ready`
-    - Ready for finalization with CSR
+### Phase 6: Certificate Issuance
 
-### Phase 6: Finalization
+13. **Finalize order** with CSR
 
-14. **Finalize Order**:
-    - POST CSR to finalize URL
-    - OpenBao issues certificate with:
-      - Subject from CSR
-      - SAN: Permanent identifier extension (OID 1.3.6.1.5.5.7.8.3)
-      - Key Usage: DigitalSignature, KeyEncipherment, KeyAgreement
-      - Extended Key Usage: IPsec End System (1.3.6.1.5.5.7.3.5), IPsec Tunnel (1.3.6.1.5.5.7.3.6)
-    - Order status: `valid`
+14. **OpenBao issues certificate**:
+    - Signed by OpenBao PKI CA
+    - Valid for 90 days (ACME standard)
+    - SAN includes permanent identifier extension
 
-15. **Download Certificate**:
-    - GET certificate URL
-    - Receive PEM-encoded certificate + chain
-    - Save to `/certs/vpn-client.pem`
+15. **Client downloads certificate**:
+    - Saved to `./vpn-client.pem`
+    - Ready for use with IPsec, VPN, etc.
+
+## Testing & Verification
+
+### Verify Persistent Handles
+
+```bash
+# Check TPM persistent handles (hardware only)
+sudo tpm2_getcap handles-persistent
+# Should show:
+#   0x81010001 (AK, AK mode only)
+#   0x81010002 (certificate key, both modes)
+```
+
+### Verify Certificate
+
+```bash
+# View issued certificate
+openssl x509 -in ./vpn-client.pem -text -noout
+
+# Check SAN with permanent identifier
+openssl x509 -in ./vpn-client.pem -text | grep -A2 "Subject Alternative Name"
+```
+
+### Clear TPM Keys
+
+```bash
+# Clear persistent handles for fresh start
+sudo ./clear_ak.sh
+```
 
 ## Configuration
 
+### Make Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build-client` | Build tpm-acme-client binary |
+| `make run-server` | Start OpenBao + gRPC server |
+| `make run-client` | Run client (auto-detects TPM or simulator) |
+| `make run-client-hw-iak` | Hardware TPM with IAK mode |
+| `make run-client-hw-ak` | Hardware TPM with AK mode |
+| `make run-client-sim` | Force simulator mode |
+
+### Command-Line Flags
+
+```bash
+./bin/tpm-acme-client -help
+
+Flags:
+  -server string
+        Server address (default "localhost:50051")
+  -tpm string
+        TPM device path (default "/dev/tpmrm0")
+  -cn string
+        Certificate common name (default "vpn-client-001.example.com")
+  -attest-mode string
+        Attestation mode: iak or ak (default "ak")
+  -simulate
+        Force simulation mode (no hardware TPM)
+  -help
+        Show this help message
+```
+
 ### Environment Variables
 
-**OpenBao** (`openbao` service):
-- `BAO_DEV_ROOT_TOKEN_ID`: Root token (default: `root`)
-- `BAO_DEV_LISTEN_ADDRESS`: Listen address (default: `0.0.0.0:8200`)
+**Server**:
+- `BAO_ADDR`: OpenBao address (default: `http://localhost:8200`)
+- `BAO_TOKEN`: OpenBao root token (default: `root`)
+- `GRPC_PORT`: gRPC server port (default: `50051`)
 
-**Server** (`server` service):
-- `BAO_ADDR`: OpenBao address (default: `http://openbao:8200`)
-- `BAO_TOKEN`: OpenBao token (default: `root`)
-- `GRPC_PORT`: gRPC port (default: `50051`)
+**Client**:
+- `SERVER_ADDR`: gRPC server address (default: `localhost:50051`)
+- `CERT_COMMON_NAME`: Certificate CN
+- `TPM_DEVICE`: TPM device path
 
-**Client** (`client` service):
-- `SERVER_ADDR`: gRPC server address (default: `server:50051`)
-- `CERT_COMMON_NAME`: Certificate CN (default: `vpn-client-001.example.com`)
-- `LOG_LEVEL`: Logging level (default: `debug`)
+## Security Considerations
 
-### Re-running the Client
+### Hardware TPM Security Properties
 
-To run the client again (e.g., to test different configurations):
+When using hardware TPM in IAK or AK mode:
 
-```bash
-# Restart the client container to run again
-docker-compose restart client
+- ✅ **Private key generated inside TPM** - Never exists in software memory
+- ✅ **FixedTPM attribute** - Key bound to specific TPM, cannot be exported
+- ✅ **FixedParent attribute** - Key cannot be moved to different parent
+- ✅ **SensitiveDataOrigin attribute** - Key generated inside TPM (not imported)
+- ✅ **TPM2_Certify proof** - IAK/AK cryptographically attests to all key attributes
+- ✅ **Persistent storage** - Keys survive reboot at known handles
+- ✅ **WebAuthn format** - Industry-standard TPM attestation format
+- ✅ **Server validation** - OpenBao validates pubArea hash matches certInfo NAME
 
-# View the new output
-docker-compose logs -f client
+### Trust Model
+
+```
+Trust Anchor 1: Manufacturer Root CAs
+    ├── EK Certificate (validates device authenticity)
+    └── IAK Certificate (validates attestation key) [IAK mode only]
+
+Trust Anchor 2: OpenBao PKI Root CA
+    └── IAK Certificate (issued for AK) [AK mode only]
+
+All modes:
+    └── Certificate Key (0x81010002) certified by IAK/AK via TPM2_Certify
+        └── Proves TPM-protected, non-exportable attributes
 ```
 
-### Customization
+### ⚠️ PoC Limitations
 
-**Change Certificate Name**:
-```bash
-docker-compose run --rm -e CERT_COMMON_NAME=vpn-client-002.example.com client
-```
+This is a **Proof-of-Concept** for demonstration purposes:
 
-**Enable EK Certificate Validation**:
-Edit `scripts/init-openbao.sh`, change:
-```bash
-"validate_ek_certificate": true
-```
+1. **Self-Enrollment Allowed**:
+   - PoC allows client-initiated TPM enrollment
+   - **Production MUST**: Admin-only enrollment via secure out-of-band channels
+   - **Production MUST**: Physical device verification before enrollment
 
-**Add Real EK Root Certificates**:
-```bash
-docker-compose exec openbao bash
-bao write pki/config/acme/ek-roots/intel-root certificate=@/path/to/intel-root.pem
-```
+2. **Empty Authorization Values**:
+   - PoC uses no passwords for TPM keys
+   - **Production MUST**: Implement proper authorization policies
 
-## Testing
+3. **No PCR Binding**:
+   - PoC does not bind keys to boot measurements
+   - **Production SHOULD**: Bind certificate keys to PCRs for measured boot
 
-### Manual Testing
+4. **No Key Rotation**:
+   - PoC has no key rotation policy
+   - **Production MUST**: Implement automated key rotation
 
-```bash
-# View all logs in real-time
-docker-compose logs -f
+## Production Recommendations
 
-# View OpenBao logs
-docker-compose logs -f openbao
+### 1. Hardware TPM Requirements
+- Run on bare metal (not containers) for TPM device access
+- Use TPM 2.0 compliant chips (Intel PTT, AMD fTPM, discrete TPMs)
+- Ensure kernel TPM drivers loaded (`tpm_tis`, `tpm_crb`)
 
-# View server logs
-docker-compose logs -f server
+### 2. Security Hardening
+- **Admin-only enrollment**: Require administrator approval for device enrollment
+- **Out-of-band verification**: Verify device identity before adding to allowlist
+- **EK validation**: Enable `validate_ek_certificate=true` in OpenBao
+- **Manufacturer CAs**: Add trusted manufacturer root CAs (Intel, AMD, Infineon, etc.)
+- **Authorization policies**: Implement TPM authorization policies for key usage
+- **PCR binding**: Bind certificate keys to PCRs for measured boot attestation
 
-# View client output
-docker-compose logs client
+### 3. Network Security
+- Use mTLS for gRPC communication
+- Encrypt all network traffic
+- Implement mutual authentication
 
-# Run client again with different settings
-docker-compose run --rm -e CERT_COMMON_NAME=test.example.com client
+### 4. Operational Security
+- Audit logging for all enrollment and attestation events
+- Monitor attestation success/failure rates
+- Alert on validation anomalies
+- Implement certificate rotation procedures
 
-# Interactive client shell (for debugging)
-docker-compose run --rm client sh
-```
+### 5. Compliance
+- FIPS 140-2/3 TPM modules for regulated environments
+- Follow TCG guidelines for TPM usage
+- Maintain audit trail for compliance reporting
 
-### API Testing
+## Standards Compliance
 
-```bash
-# Test OpenBao ACME directory
-curl http://localhost:8200/v1/pki/acme/directory | jq .
+This implementation follows:
 
-# List EK roots
-curl -X LIST \
-  -H "X-Vault-Token: root" \
-  http://localhost:8200/v1/pki/config/acme/ek-roots | jq .
+1. **TCG TPM 2.0 Keys for Device Identity and Attestation** (2018)
+   - Manufacturer-provisioned IAK support
+   - TPM-generated attestation keys
 
-# Get attestation config
-curl -H "X-Vault-Token: root" \
-  http://localhost:8200/v1/pki/config/attestation | jq .
+2. **TPM 2.0 Library Specification**
+   - `TPM2_Certify` operation
+   - `TPM_ST_ATTEST_CERTIFY` (0x8017) attestation structure
+   - `TPMT_PUBLIC` encoding
 
-# Get role config
-curl -H "X-Vault-Token: root" \
-  http://localhost:8200/v1/pki/roles/ipsec-vpn | jq .
-```
+3. **WebAuthn Level 2 - TPM Attestation**
+   - TPM attestation statement format
+   - x5c certificate chain
+   - Signature verification
+   - NAME hash verification
 
-### gRPC Testing (with grpcurl)
-
-```bash
-# List services
-docker run --rm --network deviceattestpoc_attestation-net \
-  fullstorydev/grpcurl -plaintext server:50051 list
-
-# Describe service
-docker run --rm --network deviceattestpoc_attestation-net \
-  fullstorydev/grpcurl -plaintext server:50051 \
-  describe certservice.CertificateService
-```
+4. **draft-ietf-acme-device-attest-01**
+   - `device-attest-01` challenge type
+   - Permanent identifier binding
+   - TPM attestation object format
 
 ## Troubleshooting
 
-### Client Uses Simulated TPM
+### Hardware TPM Not Detected
 
-**Message**: `Using simulated attestation mode (not suitable for production)`
+**Symptoms**:
+```
+No hardware TPM detected
+Using simulated attestation mode
+```
 
-**Explanation**: No hardware TPM detected. Client uses built-in simulation.
+**Solutions**:
+1. Check TPM device exists: `ls -l /dev/tpm*`
+2. Load TPM kernel module: `sudo modprobe tpm_tis` or `tpm_crb`
+3. Check TPM is not disabled in BIOS
+4. Run client with sudo: `sudo ./bin/tpm-acme-client`
 
-**For Production**: Run on bare metal with real TPM hardware at `/dev/tpmrm0`
+### Permission Denied on TPM Device
 
-### Server Can't Reach OpenBao
+**Error**: `failed to open TPM: permission denied`
 
-**Error**: `Failed to create ACME order: connection refused`
-
-**Solution**: Check OpenBao health:
+**Solution**: Run client with sudo:
 ```bash
-curl http://localhost:8200/v1/sys/health
-docker-compose logs openbao
+sudo ./bin/tpm-acme-client
+```
+
+### Persistent Handle Already in Use
+
+**Error**: `failed to make certificate key persistent: handle already in use`
+
+**Solution**: Clear old handles:
+```bash
+sudo ./clear_ak.sh
 ```
 
 ### Attestation Validation Fails
 
-**Error**: `badAttestationStatement` or `extraData mismatch`
+**Error**: `TPM signature verification failed`
 
 **Debugging**:
-1. Check key authorization computation in client
-2. Verify qualifying data in `certInfo`
-3. Review OpenBao logs for validation details:
-   ```bash
-   docker-compose logs openbao | grep -i attest
-   ```
+1. Check OpenBao logs: `docker-compose logs openbao | grep -i attest`
+2. Verify IAK certificate chains correctly
+3. Ensure EK root CA is configured in OpenBao
+4. Check permanent ID is enrolled
 
-### Certificate Not Issued
+### OpenBao Connection Refused
 
-**Error**: Order stuck in "ready" status
+**Error**: `Failed to connect to server: connection refused`
 
-**Reason**: Finalization not implemented in PoC server
-
-**Workaround**: Manually finalize using OpenBao API
-
-## Production Considerations
-
-This is a **Proof-of-Concept** for demonstration purposes.
-
-⚠️ **CRITICAL SECURITY NOTICE**: See [SECURITY.md](SECURITY.md) for detailed production deployment requirements, especially regarding TPM enrollment which **MUST** be performed by administrators through secure out-of-band channels.
-
-For production:
-
-1. **Use Real TPM Hardware**:
-   - Run on bare metal (not containers) for hardware TPM access
-   - Client auto-detects `/dev/tpmrm0` or `/dev/tpm0`
-   - Ensure kernel TPM drivers loaded
-   - Test with actual TPM 2.0 chips (Intel PTT, AMD fTPM, discrete TPMs)
-
-2. **Enable EK Certificate Validation**:
-   - Set `validate_ek_certificate=true`
-   - Add manufacturer root CAs (Intel, AMD, Infineon, STMicroelectronics)
-   - Verify certificate chains to trusted roots
-
-3. **Use mTLS for gRPC**:
-   - Generate server/client TLS certificates
-   - Enable mutual authentication
-   - Encrypt all gRPC communication
-
-4. **Complete Certificate Issuance**:
-   - Implement order finalization in server
-   - Submit CSR to finalize URL
-   - Download and verify certificate
-   - Handle certificate renewal
-
-5. **Add Policy Validation**:
-   - Define attestation policy OIDs
-   - Require specific TPM attributes
-   - Validate firmware versions
-   - Check for known vulnerabilities
-
-6. **Implement Error Handling**:
-   - Retry logic for transient failures
-   - Proper error reporting to clients
-   - Audit logging for security events
-
-7. **Key Management**:
-   - Secure storage for ACME account keys
-   - TPM-based key storage
-   - Key rotation procedures
-
-8. **Scalability**:
-   - Load balancing for gRPC servers
-   - OpenBao HA deployment
-   - Distributed TPM management
-
-9. **Monitoring**:
-   - Metrics for attestation success/failure rates
-   - Alerting for validation anomalies
-   - Performance monitoring
-
-10. **Compliance**:
-    - Meet FIPS 140-2/3 requirements
-    - Follow Common Criteria guidelines
-    - Comply with industry standards (e.g., TCG, IEEE 802.1AR)
-
-## Architecture Details
-
-### TPM Attestation Format
-
-Based on [draft-acme-device-attest-07](https://datatracker.ietf.org/doc/html/draft-ietf-acme-device-attest) and [WebAuthn TPM Attestation](https://www.w3.org/TR/webauthn-2/#sctn-tpm-attestation).
-
-**Attestation Object** (CBOR):
+**Solution**: Ensure server is running:
+```bash
+make run-server
+curl http://localhost:8200/v1/sys/health
 ```
-{
-  "fmt": "tpm",
-  "attStmt": {
-    "ver": "2.0",
-    "alg": -257,  // COSE algorithm (RS256)
-    "x5c": [<AIK cert DER>, ...],
-    "sig": <signature bytes>,
-    "certInfo": <TPMS_ATTEST bytes>,
-    "pubArea": <TPMT_PUBLIC bytes>
-  }
-}
-```
-
-**TPMS_ATTEST Structure**:
-```
-struct {
-  TPM_GENERATED magic;           // 0xff544347
-  TPMI_ST_ATTEST type;           // 0x8017 (certify)
-  TPM2B_NAME qualifiedSigner;
-  TPM2B_DATA extraData;          // ← Key authorization hash!
-  TPMS_CLOCK_INFO clockInfo;
-  UINT64 firmwareVersion;
-  TPMS_CERTIFY_INFO attested;    // For type=certify
-}
-```
-
-**TPMS_CERTIFY_INFO**:
-```
-struct {
-  TPM2B_NAME name;               // ← TPM name of certified key
-  TPM2B_NAME qualifiedName;
-}
-```
-
-**TPMT_PUBLIC Structure**:
-```
-struct {
-  TPMI_ALG_PUBLIC type;          // e.g., TPM_ALG_RSA
-  TPMI_ALG_HASH nameAlg;         // e.g., TPM_ALG_SHA256
-  TPMA_OBJECT objectAttributes;
-  TPM2B_DIGEST authPolicy;
-  TPMU_PUBLIC_PARMS parameters;  // RSA/ECC params
-  TPMU_PUBLIC_ID unique;         // Public key data
-}
-```
-
-### gRPC Protocol
-
-**Service Definition**:
-```protobuf
-service CertificateService {
-  // PoC-only endpoint - MUST be admin-only in production
-  rpc EnrollTPM(TPMEnrollmentRequest) returns (EnrollmentResponse);
-
-  rpc RequestCertificate(CertRequest) returns (CertResponse);
-  rpc SubmitAttestation(AttestationSubmit) returns (CertResponse);
-  rpc GetCertificate(GetCertRequest) returns (CertResponse);
-}
-```
-
-**Flow**:
-1. **Enrollment (PoC only)**: Client → `EnrollTPM` → Server → Configure OpenBao
-2. Client → `RequestCertificate` → Server
-3. Server creates ACME order on OpenBao
-4. Server ← `CertResponse` (with challenge) ← Server
-5. Client generates TPM attestation
-6. Client → `SubmitAttestation` → Server
-7. Server submits to OpenBao ACME API
-8. OpenBao validates attestation (including allowlist/blocklist check)
-9. Client → `GetCertificate` → Server
-10. Server downloads certificate from OpenBao
-11. Client ← `CertResponse` (with certificate) ← Server
 
 ## References
 
-- [draft-acme-device-attest-07](https://datatracker.ietf.org/doc/html/draft-ietf-acme-device-attest)
+- [TCG TPM 2.0 Keys for Device Identity and Attestation](https://trustedcomputinggroup.org/resource/tpm-2-0-keys-for-device-identity-and-attestation/)
+- [TPM 2.0 Library Specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/)
+- [WebAuthn Level 2 - TPM Attestation](https://www.w3.org/TR/webauthn-2/#sctn-tpm-attestation)
+- [draft-ietf-acme-device-attest-01](https://datatracker.ietf.org/doc/html/draft-ietf-acme-device-attest-01)
 - [RFC 8555 - ACME](https://datatracker.ietf.org/doc/html/rfc8555)
 - [RFC 4043 - Permanent Identifier](https://datatracker.ietf.org/doc/html/rfc4043)
-- [RFC 4108 - Hardware Module Name](https://datatracker.ietf.org/doc/html/rfc4108)
-- [WebAuthn TPM Attestation](https://www.w3.org/TR/webauthn-2/#sctn-tpm-attestation)
-- [TPM 2.0 Specification](https://trustedcomputinggroup.org/resource/tpm-library-specification/)
-- [google/go-attestation](https://github.com/google/go-attestation)
+- [Smallstep Managed Device Attestation](https://smallstep.com/blog/managed-device-attestation/)
+- [OpenBao PKI Secrets Engine](https://openbao.org/docs/secrets/pki/)
+- [go-attestation](https://github.com/google/go-attestation)
+- [go-tpm](https://github.com/google/go-tpm)
 
 ## License
 

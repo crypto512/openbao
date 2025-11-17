@@ -23,6 +23,7 @@ import (
 func main() {
 	// Command-line flags
 	simulateTPM := flag.Bool("simulate", false, "Force simulation mode (no hardware TPM)")
+	attestMode := flag.String("attest-mode", "", "Attestation mode: 'iak' (use manufacturer IAK cert) or 'ak' (create NewAK with OpenBao-issued IAK cert)")
 	serverAddr := flag.String("server", "", "Server address (default: localhost:50051 or SERVER_ADDR env)")
 	tpmDevice := flag.String("tpm", "", "TPM device path (default: /dev/tpmrm0 or TPM_DEVICE env)")
 	commonName := flag.String("cn", "", "Certificate common name (default: vpn-client-001.example.com or CERT_COMMON_NAME env)")
@@ -38,12 +39,15 @@ func main() {
 		fmt.Println("  tpm-acme-client [options]")
 		fmt.Println("")
 		fmt.Println("Options:")
-		fmt.Println("  -simulate       Force simulation mode (no hardware TPM)")
-		fmt.Println("  -server <addr>  Server address (default: localhost:50051)")
-		fmt.Println("  -tpm <device>   TPM device path (default: /dev/tpmrm0)")
-		fmt.Println("  -cn <name>      Certificate common name (default: vpn-client-001.example.com)")
+		fmt.Println("  -simulate           Force simulation mode (no hardware TPM)")
+		fmt.Println("  -attest-mode <mode> Attestation mode:")
+		fmt.Println("                        'iak' = Use manufacturer-provisioned IAK certificate")
+		fmt.Println("                        'ak'  = Create NewAK and get OpenBao-issued IAK certificate")
+		fmt.Println("  -server <addr>      Server address (default: localhost:50051)")
+		fmt.Println("  -tpm <device>       TPM device path (default: /dev/tpmrm0)")
+		fmt.Println("  -cn <name>          Certificate common name (default: vpn-client-001.example.com)")
 		fmt.Println("  -cert-output <path> Certificate output file (default: ./vpn-client.pem)")
-		fmt.Println("  -help           Show this help message")
+		fmt.Println("  -help               Show this help message")
 		fmt.Println("")
 		fmt.Println("Environment Variables:")
 		fmt.Println("  SERVER_ADDR         Server address (overridden by -server)")
@@ -52,14 +56,17 @@ func main() {
 		fmt.Println("  CERT_OUTPUT         Certificate output file (overridden by -cert-output)")
 		fmt.Println("")
 		fmt.Println("Examples:")
-		fmt.Println("  # Use hardware TPM (requires sudo for /dev/tpm access):")
-		fmt.Println("  sudo ./tpm-acme-client")
+		fmt.Println("  # IAK mode with hardware TPM (requires sudo for /dev/tpm access):")
+		fmt.Println("  sudo ./tpm-acme-client -attest-mode iak")
+		fmt.Println("")
+		fmt.Println("  # AK mode with hardware TPM:")
+		fmt.Println("  sudo ./tpm-acme-client -attest-mode ak")
 		fmt.Println("")
 		fmt.Println("  # Force simulation mode:")
 		fmt.Println("  ./tpm-acme-client -simulate")
 		fmt.Println("")
-		fmt.Println("  # Use custom server and simulation mode:")
-		fmt.Println("  ./tpm-acme-client -simulate -server server.example.com:50051")
+		fmt.Println("  # Use custom server with IAK mode:")
+		fmt.Println("  sudo ./tpm-acme-client -attest-mode iak -server server.example.com:50051")
 		os.Exit(0)
 	}
 
@@ -101,6 +108,11 @@ func main() {
 		}
 	}
 
+	// Validate attestation mode
+	if *attestMode != "" && *attestMode != "iak" && *attestMode != "ak" {
+		log.Fatalf("Invalid -attest-mode value: %s. Must be 'iak' or 'ak'", *attestMode)
+	}
+
 	log.Printf("==============================================")
 	log.Printf("ACME Device Attestation Client")
 	log.Printf("==============================================")
@@ -110,14 +122,54 @@ func main() {
 		finalTPMDevice = "simulate"
 	} else {
 		log.Printf("TPM Device: %s", finalTPMDevice)
-		log.Printf("Mode: AUTO-DETECT (will try hardware, fallback to simulation)")
+		log.Printf("Mode: HARDWARE TPM")
+		if *attestMode != "" {
+			log.Printf("Attestation Mode: %s", strings.ToUpper(*attestMode))
+			if *attestMode == "iak" {
+				log.Printf("  → Using manufacturer-provisioned IAK certificate")
+			} else {
+				log.Printf("  → Using NewAK with OpenBao-issued IAK certificate")
+			}
+		}
 	}
 	log.Printf("Certificate CN: %s", finalCommonName)
 	log.Printf("")
 
+	// Determine CA certificates base path
+	// Try to find ca/ directory relative to executable
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Fatalf("Failed to get executable path: %v", err)
+	}
+	exeDir := filepath.Dir(exePath)
+
+	// Try multiple potential locations for CA certificates
+	potentialCAPaths := []string{
+		filepath.Join(exeDir, "..", "ca"),           // bin/../ca (when running from bin/)
+		filepath.Join(exeDir, "ca"),                 // ./ca (when running from project root)
+		filepath.Join(exeDir, "deviceattestpoc", "ca"), // Special case
+	}
+
+	var caBasePath string
+	for _, path := range potentialCAPaths {
+		if stat, err := os.Stat(path); err == nil && stat.IsDir() {
+			caBasePath = path
+			break
+		}
+	}
+
+	if caBasePath == "" {
+		log.Fatalf("Failed to find CA certificates directory. Tried: %v", potentialCAPaths)
+	}
+
+	log.Printf("Using CA certificates from: %s", caBasePath)
+
 	// Initialize TPM client
-	log.Println("Step 1: Initializing TPM client...")
-	tpmClient, err := NewTPMClient(finalTPMDevice)
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Initializing TPM...")
+	log.Println("═══════════════════════════════════════════════")
+	tpmClient, err := NewTPMClient(finalTPMDevice, caBasePath, *attestMode)
 	if err != nil {
 		log.Fatalf("Failed to initialize TPM client: %v", err)
 	}
@@ -128,7 +180,10 @@ func main() {
 	log.Println("")
 
 	// Generate CSR
-	log.Println("Step 2: Generating Certificate Signing Request...")
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Generating Certificate Signing Request...")
+	log.Println("═══════════════════════════════════════════════")
 	csrPEM, err := tpmClient.GenerateCSR(finalCommonName, []string{finalCommonName}, nil)
 	if err != nil {
 		log.Fatalf("Failed to generate CSR: %v", err)
@@ -137,7 +192,10 @@ func main() {
 	log.Println("")
 
 	// Connect to gRPC server
-	log.Println("Step 3: Connecting to gRPC server...")
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Connecting to server...")
+	log.Println("═══════════════════════════════════════════════")
 	conn, err := grpc.Dial(finalServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("Failed to connect to server: %v", err)
@@ -152,8 +210,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Step 3.5: Enroll TPM device (PoC only - normally done by admin)
-	log.Println("Step 3.5: Enrolling TPM device (PoC demonstration only)...")
+	// Enroll TPM device (PoC only - normally done by admin)
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Enrolling TPM device (PoC demonstration only)...")
+	log.Println("═══════════════════════════════════════════════")
 	log.Println("")
 	log.Println("⚠️  IMPORTANT SECURITY NOTICE:")
 	log.Println("   In production, TPM enrollment MUST be performed by administrators")
@@ -187,8 +248,58 @@ func main() {
 	log.Printf("  EK Root CA: %s", enrollResp.EkRootCaName)
 	log.Println("")
 
+	// Provision IAK certificate if needed (AK mode only)
+	if tpmClient.NeedsIAKProvisioning() {
+		log.Println("")
+		log.Println("═══════════════════════════════════════════════")
+		log.Println("Provisioning IAK certificate from OpenBao...")
+		log.Println("═══════════════════════════════════════════════")
+		log.Println("")
+		log.Println("ℹ️  AK MODE:")
+		log.Println("   This TPM lacks manufacturer-provisioned IAK certificate.")
+		log.Println("   OpenBao will act as a Privacy CA and issue an IAK certificate")
+		log.Println("   for the newly created Attestation Key (AK).")
+		log.Println("")
+
+		// Get provisioning data from TPM client
+		akPublicDER, ekCertPEM, err := tpmClient.GetIAKProvisioningData()
+		if err != nil {
+			log.Fatalf("Failed to get IAK provisioning data: %v", err)
+		}
+
+		provisionReq := &pb.ProvisionAIKRequest{
+			PermanentIdentifier: permanentID,
+			AkPublicKey:         akPublicDER,
+			EkCertificatePem:    ekCertPEM,
+		}
+
+		provisionResp, err := client.ProvisionAIK(ctx, provisionReq)
+		if err != nil {
+			log.Fatalf("Failed to provision IAK certificate: %v", err)
+		}
+
+		if provisionResp.Status == "error" {
+			log.Fatalf("IAK provisioning failed: %s", provisionResp.Error)
+		}
+
+		// Store the IAK certificate
+		err = tpmClient.SetIAKCertificate(provisionResp.IakCertificatePem)
+		if err != nil {
+			log.Fatalf("Failed to store IAK certificate: %v", err)
+		}
+
+		log.Printf("✓ IAK certificate provisioned successfully by OpenBao")
+		log.Printf("  Issuer: OpenBao PKI-IAK CA")
+		log.Printf("  Valid from: %s", provisionResp.NotBefore)
+		log.Printf("  Valid until: %s", provisionResp.NotAfter)
+		log.Println("")
+	}
+
 	// Request certificate with device attestation
-	log.Println("Step 4: Requesting certificate with device attestation...")
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Requesting certificate with device attestation...")
+	log.Println("═══════════════════════════════════════════════")
 
 	certReq := &pb.CertRequest{
 		CommonName:          finalCommonName,
@@ -214,7 +325,10 @@ func main() {
 	log.Println("")
 
 	// Generate TPM attestation
-	log.Println("Step 5: Generating TPM attestation...")
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Generating TPM attestation...")
+	log.Println("═══════════════════════════════════════════════")
 	keyAuthorization := fmt.Sprintf("%s.%s", resp.ChallengeToken, resp.AccountThumbprint)
 	attestationObject, err := tpmClient.GenerateAttestation(keyAuthorization)
 	if err != nil {
@@ -224,7 +338,10 @@ func main() {
 	log.Println("")
 
 	// Submit attestation
-	log.Println("Step 6: Submitting attestation to server...")
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Submitting attestation to server...")
+	log.Println("═══════════════════════════════════════════════")
 	attReq := &pb.AttestationSubmit{
 		OrderId:           resp.OrderId,
 		AuthorizationUrl:  resp.AuthorizationUrl,
@@ -246,7 +363,10 @@ func main() {
 	log.Println("")
 
 	// Get certificate - poll until ready
-	log.Println("Step 7: Retrieving certificate...")
+	log.Println("")
+	log.Println("═══════════════════════════════════════════════")
+	log.Println("Retrieving certificate...")
+	log.Println("═══════════════════════════════════════════════")
 
 	certGetReq := &pb.GetCertRequest{
 		OrderId: resp.OrderId,

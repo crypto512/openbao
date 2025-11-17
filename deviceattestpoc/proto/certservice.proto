@@ -22,6 +22,12 @@ service CertificateService {
   // WARNING: This is a PoC-only endpoint. In production, enrollment MUST be
   // performed by administrators through secure out-of-band channels, NOT by clients.
   rpc EnrollTPM(TPMEnrollmentRequest) returns (EnrollmentResponse);
+
+  // ProvisionAIK issues an IAK certificate for a TPM attestation key (AK mode)
+  // This endpoint acts as a Privacy CA, issuing IAK certificates for TPMs that lack
+  // manufacturer-provisioned IAK certificates. The AK is created by the client using
+  // go-attestation NewAK(), and OpenBao signs it after validating the enrolled EK.
+  rpc ProvisionAIK(ProvisionAIKRequest) returns (ProvisionAIKResponse);
 }
 
 // CertRequest contains the certificate signing request for IPsec VPN
@@ -132,4 +138,40 @@ message EnrollmentResponse {
 
   // The enrolled EK root CA name
   string ek_root_ca_name = 5;
+}
+
+// ProvisionAIKRequest requests an IAK certificate for a new attestation key
+// This is used in AK mode when TPM lacks manufacturer-provisioned IAK
+message ProvisionAIKRequest {
+  // TPM permanent identifier (must be already enrolled)
+  string permanent_identifier = 1;
+
+  // DER-encoded AK public key (from go-attestation NewAK)
+  // This is the PKIX/SPKI format from x509.MarshalPKIXPublicKey
+  bytes ak_public_key = 2;
+
+  // PEM-encoded EK certificate for validation
+  // Must match the enrolled permanent_identifier
+  string ek_certificate_pem = 3;
+}
+
+// ProvisionAIKResponse contains the OpenBao-issued IAK certificate
+message ProvisionAIKResponse {
+  // Status: "success" or "error"
+  string status = 1;
+
+  // Error message if status is "error"
+  string error = 2;
+
+  // PEM-encoded IAK certificate signed by OpenBao PKI-IAK CA
+  // This certificate can be used in TPM attestation (x5c field)
+  string iak_certificate_pem = 3;
+
+  // PEM-encoded OpenBao PKI-IAK root CA certificate
+  // For building the certificate chain
+  string iak_root_ca_pem = 4;
+
+  // Certificate validity period
+  string not_before = 5;
+  string not_after = 6;
 }
