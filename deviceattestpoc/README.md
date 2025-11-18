@@ -557,7 +557,7 @@ sudo ./clear_ak.sh
 **Error**: `TPM signature verification failed`
 
 **Debugging**:
-1. Check OpenBao logs: `docker-compose logs openbao | grep -i attest`
+1. Check OpenBao logs: `docker compose logs openbao | grep -i attest`
 2. Verify IAK certificate chains correctly
 3. Ensure EK root CA is configured in OpenBao
 4. Check permanent ID is enrolled

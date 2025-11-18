@@ -12,9 +12,9 @@ echo "========================================="
 echo
 
 # Check if Docker Compose environment is running
-if ! docker-compose ps | grep -q "Up"; then
+if ! docker compose ps | grep -q "Up"; then
     echo "Starting Docker Compose environment..."
-    docker-compose up -d
+    docker compose up -d
     sleep 10
 fi
 
@@ -83,7 +83,7 @@ fi
 echo
 
 echo "=== Test 7: Verify client is ready ==="
-if docker-compose ps client | grep -q "Up\|Exit 0"; then
+if docker compose ps client | grep -q "Up\|Exit 0"; then
     echo "✓ Client container is available"
 else
     echo "✗ Client container not found"
@@ -92,7 +92,7 @@ fi
 echo
 
 echo "=== Test 8: Verify gRPC server is running ==="
-if docker-compose ps server | grep -q "Up"; then
+if docker compose ps server | grep -q "Up"; then
     echo "✓ gRPC server is running"
 else
     echo "✗ gRPC server is not running"
@@ -102,7 +102,7 @@ echo
 
 echo "=== Test 9: Run client certificate request ==="
 echo "Executing client..."
-docker-compose run --rm client /client > /tmp/client-output.txt 2>&1
+docker compose run --rm client /client > /tmp/client-output.txt 2>&1
 
 if grep -q "ACME Device Attestation Flow Completed" /tmp/client-output.txt; then
     echo "✓ Client completed successfully"

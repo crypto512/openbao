@@ -95,19 +95,19 @@ build-server:
 clean:
 	@echo "Cleaning binaries..."
 	@rm -rf bin/
-	@docker-compose down -v 2>/dev/null || true
+	@docker compose down -v 2>/dev/null || true
 	@echo "✓ Cleaned"
 
 # Run full PoC in Docker (simulated TPM)
 run-docker:
 	@echo "Starting PoC in Docker (simulated TPM mode)..."
-	@docker-compose up --build
+	@docker compose up --build
 
 # Run only server infrastructure (for use with standalone client)
 run-server:
 	@echo "Starting server infrastructure..."
 	@echo "Press Ctrl+C to stop when done testing"
-	@docker-compose up --build openbao init server
+	@docker compose up --build openbao init server
 
 # Run standalone client in SIMULATION mode
 run-client-sim: build-client
@@ -134,11 +134,11 @@ run-client-hw-ak: build-client
 # Test full PoC
 test:
 	@echo "Running PoC test..."
-	@docker-compose up --build -d
+	@docker compose up --build -d
 	@sleep 20
 	@echo ""
 	@echo "=== Client logs ==="
 	@docker logs cert-client 2>&1 | grep -E "(Step|✓|Error|Failed|ACME)"
 	@echo ""
-	@docker-compose down
+	@docker compose down
 	@echo "✓ Test completed"
