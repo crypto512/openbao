@@ -384,4 +384,3 @@ Storage is automatically namespaced to your mount's prefix.
 - Validate all user input thoroughly
 - Follow principle of least privilege for capabilities
 - Any missing must from the draft must be implemented.
-- build require go 1.25
