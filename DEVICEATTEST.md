@@ -609,59 +609,9 @@ X509v3 Subject Alternative Name:
 
 Configure trusted manufacturer root CA certificates for validating TPM endorsement key certificates.
 
-### Intel TPM
+### Microsoft provide a package with all TPM manufacturer CA
 
-Download from: https://trustedservices.intel.com/content/TSC/certs/
-
-```bash
-curl -O https://trustedservices.intel.com/content/TSC/certs/Intel_TPM_RootCA.pem
-
-bao write pki/config/acme/ek-roots/intel \
-  name=intel \
-  certificate=@Intel_TPM_RootCA.pem
-```
-
-### Infineon OPTIGA TPM
-
-Download from: https://www.infineon.com/cms/en/product/security-smart-card-solutions/
-
-```bash
-bao write pki/config/acme/ek-roots/infineon-ecc \
-  name=infineon-ecc \
-  certificate=@Infineon_OPTIGA_ECC_Root_CA.pem
-
-bao write pki/config/acme/ek-roots/infineon-rsa \
-  name=infineon-rsa \
-  certificate=@Infineon_OPTIGA_RSA_Root_CA.pem
-```
-
-### STMicroelectronics TPM
-
-Download from: https://www.st.com/content/st_com/en/products/secure-mcus/
-
-```bash
-bao write pki/config/acme/ek-roots/stm \
-  name=stm \
-  certificate=@STM_TPM_EK_Root_CA.pem
-```
-
-### AMD TPM (fTPM)
-
-```bash
-bao write pki/config/acme/ek-roots/amd \
-  name=amd \
-  certificate=@AMD_Root_CA.pem
-```
-
-### Nuvoton TPM
-
-Download from: https://www.nuvoton.com/products/cloud-and-data-center-solutions/
-
-```bash
-bao write pki/config/acme/ek-roots/nuvoton \
-  name=nuvoton \
-  certificate=@Nuvoton_TPM_Root_CA.pem
-```
+https://go.microsoft.com/fwlink/?linkid=2097925
 
 ## Security Model
 
