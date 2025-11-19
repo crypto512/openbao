@@ -4,6 +4,25 @@
 # ACME Device Attestation PoC - Docker Compose Configuration
 
 services:
+  # Software TPM 2.0 - Provides TPM functionality for client attestation
+  tpm1:
+    build:
+      context: ./swtpm
+      dockerfile: Dockerfile
+    container_name: swtpm-tpm1
+    hostname: tpm1
+    volumes:
+      - ./ca/swtpm-manufacturer/RootCA:/app/ca/root:ro
+      - ./ca/swtpm-manufacturer/IntermediateCA:/app/ca/intermediate:ro
+    networks:
+      - attestation-net
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z localhost 2321 && nc -z localhost 2322"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+      start_period: 10s
+
   # OpenBao Server - Secrets Management and ACME Certificate Authority
   openbao:
     image: alpine:3.22
@@ -82,16 +101,20 @@ services:
     container_name: cert-client
     hostname: client
     depends_on:
+      tpm1:
+        condition: service_healthy
       server:
         condition: service_started
     environment:
       - SERVER_ADDR=server:50051
       - CERT_COMMON_NAME=vpn-client-001.example.com
       - LOG_LEVEL=debug
+      - TPM2TOOLS_TCTI=swtpm:host=tpm1,port=2321
+      - TPM_SWTPM_HOST=tpm1
+      - TPM_SWTPM_PORT=2321
     volumes:
       - client-certs:/certs
-    # Note: No hardware TPM in container - uses simulated attestation mode
-    # In production, would run on bare metal with real TPM device
+      - ./ca:/ca:ro
     networks:
       - attestation-net
 

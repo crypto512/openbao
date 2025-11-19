@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -21,7 +20,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/google/go-attestation/attest"
@@ -33,17 +31,14 @@ import (
 type TPMClient struct {
 	tpm                  *attest.TPM
 	ak                   *attest.AK
-	certKey              *rsa.PrivateKey
 	permanentID          string
-	ekCert               *x509.Certificate      // EK certificate from hardware TPM
+	ekCert               *x509.Certificate      // EK certificate from TPM
 	iakCert              *x509.Certificate      // IAK certificate (manufacturer pre-provisioned or OpenBao-issued)
 	iakHandle            tpmutil.Handle         // IAK key handle in TPM persistent storage
-	ekRootCA             *x509.Certificate      // Manufacturer root CA (from EK cert or simulated)
-	ekRootCAKey          *rsa.PrivateKey        // Private key for root CA (simulated mode only)
-	hardwareMode         bool                   // true if using real TPM hardware
+	ekRootCA             *x509.Certificate      // Manufacturer root CA from EK cert
 	attestMode           string                 // "iak" = manufacturer IAK, "ak" = NewAK with OpenBao-issued IAK, "" = auto-detect
 	akAuthValue          string                 // Auth value for created AK (AK mode only, empty for PoC)
-	manufacturerCA       string                 // Manufacturer name (e.g., "intel", "amd", "infineon")
+	manufacturerCA       string                 // Manufacturer name (e.g., "intel", "amd", "infineon", "swtpm-manufacturer")
 	caBasePath           string                 // Base path to CA certificates directory
 	tpmDevice            string                 // TPM device path for low-level access
 	certKeyHandle        tpmutil.Handle         // Certificate key handle in TPM (persistent 0x81010002)
@@ -62,56 +57,34 @@ func NewTPMClient(tpmPath string, caBasePath string, attestMode string) (*TPMCli
 
 	// Open TPM with auto-detection
 	// go-attestation will try /dev/tpmrm0, /dev/tpm0, and Windows TPM automatically
+	// For swtpm, the entrypoint script creates a symlink at /dev/tpmrm0
 	config := &attest.OpenConfig{
 		TPMVersion: attest.TPMVersion20,
 	}
 
 	tpm, err := attest.OpenTPM(config)
 	if err != nil {
-		// TPM not available - use simulated mode for PoC
-		log.Printf("No hardware TPM detected (%v)", err)
-		log.Printf("Using simulated attestation mode (not suitable for production)")
-
-		client := &TPMClient{
-			tpm:        nil, // No real TPM
-			caBasePath: caBasePath,
-		}
-
-		// In simulated mode, skip EK and AK creation
-		// Extract simulated permanent ID
-		if err := client.extractSimulatedPermanentID(); err != nil {
-			return nil, fmt.Errorf("failed to generate simulated permanent ID: %w", err)
-		}
-
-		// Generate certificate key
-		certKey, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate certificate key: %w", err)
-		}
-		client.certKey = certKey
-
-		return client, nil
+		return nil, fmt.Errorf("failed to open TPM: %w\n\nHint: Ensure TPM is available via:\n  - Hardware TPM: /dev/tpmrm0 or /dev/tpm0\n  - SWTPM: Set TPM_SWTPM_HOST and TPM_SWTPM_PORT environment variables", err)
 	}
 
-	log.Printf("✓ Hardware TPM detected and opened successfully")
+	log.Printf("✓ TPM detected and opened successfully")
 
 	client := &TPMClient{
-		tpm:          tpm,
-		hardwareMode: true,
-		caBasePath:   caBasePath,
-		tpmDevice:    tpmPath,
-		attestMode:   attestMode,
+		tpm:        tpm,
+		caBasePath: caBasePath,
+		tpmDevice:  tpmPath,
+		attestMode: attestMode,
 	}
 
-	// Get EK certificates from hardware TPM
+	// Get EK certificates from TPM
 	eks, err := tpm.EKs()
 	if err != nil {
 		tpm.Close()
-		return nil, fmt.Errorf("failed to get EKs from hardware TPM: %w", err)
+		return nil, fmt.Errorf("failed to get EKs from TPM: %w", err)
 	}
 
 	if len(eks) > 0 {
-		log.Printf("Found %d EK(s) from hardware TPM", len(eks))
+		log.Printf("Found %d EK(s) from TPM", len(eks))
 
 		// Use the first EK (typically RSA EK)
 		ek := eks[0]
@@ -128,11 +101,11 @@ func NewTPMClient(tpmPath string, caBasePath string, attestMode string) (*TPMCli
 			log.Printf("✓ Manufacturer root CA loaded: %s", client.manufacturerCA)
 		} else {
 			tpm.Close()
-			return nil, fmt.Errorf("EK found but no certificate in NVRAM - hardware TPM requires EK certificate")
+			return nil, fmt.Errorf("EK found but no certificate in NVRAM - TPM requires EK certificate")
 		}
 	} else {
 		tpm.Close()
-		return nil, fmt.Errorf("no EKs found in hardware TPM")
+		return nil, fmt.Errorf("no EKs found in TPM")
 	}
 
 	// Decide attestation mode: manufacturer IAK or NewAK with OpenBao-issued IAK
@@ -182,14 +155,15 @@ func NewTPMClient(tpmPath string, caBasePath string, attestMode string) (*TPMCli
 	log.Println("  → Using persistent AK with OpenBao-issued IAK certificate...")
 	if attestMode == "" {
 		log.Println("  (auto-detected: no manufacturer IAK available)")
+		client.attestMode = "ak" // Set attestMode so NeedsIAKProvisioning() works
 	}
 
 	// Create persistent AK for production use
 	// This gives us a known handle for TPM2_Certify operations
 	log.Println("Creating persistent Attestation Key (AK) in TPM...")
 
-	// Use persistent handle 0x81010001 for the AK (custom range)
-	persistentAKHandle := tpmutil.Handle(0x81010001)
+	// Use persistent handle 0x81010002 for the AK (EK is at 0x81010001)
+	persistentAKHandle := tpmutil.Handle(0x81010002)
 
 	err = client.createPersistentAK(persistentAKHandle)
 	if err != nil {
@@ -219,16 +193,18 @@ func NewTPMClient(tpmPath string, caBasePath string, attestMode string) (*TPMCli
 	return client, nil
 }
 
+// openTPMDevice opens the TPM device, supporting both device files and Unix sockets
+func (c *TPMClient) openTPMDevice() (io.ReadWriteCloser, error) {
+	// Use tpmutil.OpenTPM which handles both /dev/tpmrm0 device files and Unix sockets
+	return tpmutil.OpenTPM(c.tpmDevice)
+}
+
 // hasManufacturerIAK checks if the TPM has a manufacturer-provisioned IAK certificate
 func (c *TPMClient) hasManufacturerIAK() bool {
-	if !c.hardwareMode {
-		return false
-	}
-
 	// Try to read IAK from NVRAM (lightweight check)
 	const nvIndexIAKRSA tpmutil.Handle = 0x01C00012
 
-	rwc, err := os.OpenFile(c.tpmDevice, os.O_RDWR, 0)
+	rwc, err := c.openTPMDevice()
 	if err != nil {
 		return false
 	}
@@ -377,7 +353,7 @@ func (c *TPMClient) GetIAKProvisioningData() (akPublicDER []byte, ekCertPEM stri
 	}
 
 	// Open TPM to read AK public key
-	rwc, err := os.OpenFile(c.tpmDevice, os.O_RDWR, 0)
+	rwc, err := c.openTPMDevice()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to open TPM device: %w", err)
 	}
@@ -454,7 +430,7 @@ func (c *TPMClient) findIAKHandle() (tpmutil.Handle, error) {
 	}
 
 	// Open TPM device for handle enumeration
-	rwc, err := os.OpenFile(c.tpmDevice, os.O_RDWR, 0)
+	rwc, err := c.openTPMDevice()
 	if err != nil {
 		return 0, fmt.Errorf("failed to open TPM device: %w", err)
 	}
@@ -588,6 +564,8 @@ func (c *TPMClient) extractManufacturerCA() error {
 
 	// Identify manufacturer based on issuer information
 	switch {
+	case contains(issuerOrg, "SWTPM") || contains(issuerCN, "SWTPM"):
+		c.manufacturerCA = "swtpm-manufacturer"
 	case contains(issuerOrg, "Intel") || contains(issuerCN, "Intel"):
 		c.manufacturerCA = "intel"
 	case contains(issuerOrg, "AMD") || contains(issuerCN, "AMD"):
@@ -620,11 +598,12 @@ func (c *TPMClient) extractManufacturerCA() error {
 func (c *TPMClient) loadManufacturerRootCA() error {
 	// Map of manufacturer to their root CA certificate filenames
 	rootCAFiles := map[string][]string{
-		"stmicro":  {"ST TPM Root Certificate.crt", "GlobalSign Trusted Computing CA.crt"},
-		"intel":    {"Intel TPM Root Certificate Authority 2013.crt", "Intel TPM EK intermediate for TPM_EK_ID.crt"},
-		"infineon": {"Infineon OPTIGA(TM) TPM 2.0 ECC CA 012.crt", "Infineon OPTIGA(TM) RSA CA 012.crt"},
-		"nuvoton":  {"Nuvoton TPM Root CA 2111.cer", "Nuvoton TPM Root CA 1110.cer"},
-		"amd":      {"AMD fTPM EK Certificate Signing Root CA.crt"},
+		"swtpm-manufacturer": {"SWTPM Manufacturer Root CA.crt"},
+		"stmicro":            {"ST TPM Root Certificate.crt", "GlobalSign Trusted Computing CA.crt"},
+		"intel":              {"Intel TPM Root Certificate Authority 2013.crt", "Intel TPM EK intermediate for TPM_EK_ID.crt"},
+		"infineon":           {"Infineon OPTIGA(TM) TPM 2.0 ECC CA 012.crt", "Infineon OPTIGA(TM) RSA CA 012.crt"},
+		"nuvoton":            {"Nuvoton TPM Root CA 2111.cer", "Nuvoton TPM Root CA 1110.cer"},
+		"amd":                {"AMD fTPM EK Certificate Signing Root CA.crt"},
 	}
 
 	// Get the list of possible root CA files for this manufacturer
@@ -701,59 +680,40 @@ func toLower(s string) string {
 
 // extractPermanentID extracts the permanent identifier from TPM
 func (c *TPMClient) extractPermanentID() error {
-	if c.hardwareMode && c.ekCert != nil {
-		// Hardware mode: Extract permanent ID from EK certificate
-		// The permanent identifier can be in several places:
-		// 1. Subject Alternative Name with OID 1.3.6.1.5.5.7.8.3 (permanent-identifier)
-		// 2. Subject Serial Number
-		// 3. Certificate Serial Number
+	if c.ekCert == nil {
+		return fmt.Errorf("EK certificate not available")
+	}
 
-		// Try to find permanent-identifier in SAN extensions
-		permanentIDOID := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 8, 3}
-		for _, ext := range c.ekCert.Extensions {
-			if ext.Id.Equal(permanentIDOID) {
-				// Found permanent identifier extension
-				var permanentID string
-				if _, err := asn1.Unmarshal(ext.Value, &permanentID); err == nil {
-					c.permanentID = permanentID
-					log.Printf("✓ Permanent ID extracted from EK certificate SAN: %s", c.permanentID)
-					return nil
-				}
+	// Extract permanent ID from EK certificate
+	// The permanent identifier can be in several places:
+	// 1. Subject Alternative Name with OID 1.3.6.1.5.5.7.8.3 (permanent-identifier)
+	// 2. Subject Serial Number
+	// 3. Certificate Serial Number
+
+	// Try to find permanent-identifier in SAN extensions
+	permanentIDOID := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 8, 3}
+	for _, ext := range c.ekCert.Extensions {
+		if ext.Id.Equal(permanentIDOID) {
+			// Found permanent identifier extension
+			var permanentID string
+			if _, err := asn1.Unmarshal(ext.Value, &permanentID); err == nil {
+				c.permanentID = permanentID
+				log.Printf("✓ Permanent ID extracted from EK certificate SAN: %s", c.permanentID)
+				return nil
 			}
 		}
+	}
 
-		// Fallback to Subject Serial Number
-		if c.ekCert.Subject.SerialNumber != "" {
-			c.permanentID = c.ekCert.Subject.SerialNumber
-			log.Printf("✓ Permanent ID extracted from EK certificate Subject: %s", c.permanentID)
-			return nil
-		}
-
-		// Fallback to certificate serial number as hex string
-		c.permanentID = fmt.Sprintf("TPM-SN-%s", c.ekCert.SerialNumber.Text(16))
-		log.Printf("✓ Permanent ID derived from EK certificate serial: %s", c.permanentID)
+	// Fallback to Subject Serial Number
+	if c.ekCert.Subject.SerialNumber != "" {
+		c.permanentID = c.ekCert.Subject.SerialNumber
+		log.Printf("✓ Permanent ID extracted from EK certificate Subject: %s", c.permanentID)
 		return nil
 	}
 
-	// Simulation mode or no hardware: Use hash-based permanent ID
-	params := c.ak.AttestationParameters()
-	pubKeyHash := sha256.Sum256(params.Public)
-	c.permanentID = fmt.Sprintf("TPM-%X", pubKeyHash[:8])
-
-	log.Printf("Permanent ID (derived from AK): %s", c.permanentID)
-	return nil
-}
-
-// extractSimulatedPermanentID generates a simulated permanent ID when no TPM is available
-func (c *TPMClient) extractSimulatedPermanentID() error {
-	// Generate a random permanent ID for simulation
-	randomBytes := make([]byte, 16)
-	if _, err := rand.Read(randomBytes); err != nil {
-		return err
-	}
-
-	c.permanentID = fmt.Sprintf("SIM-TPM-%X", randomBytes[:8])
-	log.Printf("Simulated Permanent ID: %s", c.permanentID)
+	// Fallback to certificate serial number as hex string
+	c.permanentID = fmt.Sprintf("TPM-SN-%s", c.ekCert.SerialNumber.Text(16))
+	log.Printf("✓ Permanent ID derived from EK certificate serial: %s", c.permanentID)
 	return nil
 }
 
@@ -771,7 +731,7 @@ func (s *TPMSigner) Public() crypto.PublicKey {
 
 // Sign signs the digest using the TPM
 func (s *TPMSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	rwc, err := os.OpenFile(s.tpmDevice, os.O_RDWR, 0)
+	rwc, err := tpmutil.OpenTPM(s.tpmDevice)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open TPM device: %w", err)
 	}
@@ -855,13 +815,12 @@ func (c *TPMClient) GenerateAttestation(keyAuthorization string) (string, error)
 
 	log.Printf("Key authorization hash: %X", qualifyingData[:16])
 
-	if c.hardwareMode && c.tpm != nil {
-		// Hardware TPM mode: Use real TPM Quote for attestation
-		return c.generateHardwareAttestation(keyAuthorization, qualifyingData[:])
+	if c.tpm == nil {
+		return "", fmt.Errorf("TPM not available")
 	}
 
-	// Simulation mode: Use simulated attestation
-	return c.generateSimulatedAttestation(keyAuthorization, qualifyingData[:])
+	// Use real TPM attestation
+	return c.generateHardwareAttestation(keyAuthorization, qualifyingData[:])
 }
 
 // quoteWithIAKHandle generates a TPM Quote using the manufacturer-provisioned IAK handle
@@ -869,7 +828,7 @@ func (c *TPMClient) GenerateAttestation(keyAuthorization string) (string, error)
 // This generates TPM_ST_ATTEST_CERTIFY (0x8017) instead of TPM_ST_ATTEST_QUOTE (0x8018)
 func (c *TPMClient) certifyWithAK(qualifyingData []byte, akHandle tpmutil.Handle) (*attest.Quote, error) {
 	// Open TPM device for certify operation
-	rwc, err := os.OpenFile(c.tpmDevice, os.O_RDWR, 0)
+	rwc, err := c.openTPMDevice()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open TPM device: %w", err)
 	}
@@ -959,7 +918,7 @@ func (c *TPMClient) certifyWithAK(qualifyingData []byte, akHandle tpmutil.Handle
 // createPersistentAK creates an Attestation Key and stores it persistently in TPM
 // This is the production-ready approach for AK mode
 func (c *TPMClient) createPersistentAK(persistentHandle tpmutil.Handle) error {
-	rwc, err := os.OpenFile(c.tpmDevice, os.O_RDWR, 0)
+	rwc, err := c.openTPMDevice()
 	if err != nil {
 		return fmt.Errorf("failed to open TPM device: %w", err)
 	}
@@ -1010,6 +969,9 @@ func (c *TPMClient) createPersistentAK(persistentHandle tpmutil.Handle) error {
 		return fmt.Errorf("failed to persist AK: %w", err)
 	}
 
+	// Flush the transient handle now that it's persisted
+	tpm2.FlushContext(rwc, transientAK)
+
 	log.Printf("✓ AK created and persisted (handle: 0x%X)", persistentHandle)
 	return nil
 }
@@ -1018,10 +980,10 @@ func (c *TPMClient) createPersistentAK(persistentHandle tpmutil.Handle) error {
 // The key is created as a PRIMARY key directly under the Owner hierarchy
 // Key attributes: FixedTPM | FixedParent | SensitiveDataOrigin (non-exportable, TPM-generated)
 func (c *TPMClient) createPersistentCertificateKey(akHandle tpmutil.Handle) error {
-	persistentHandle := tpmutil.Handle(0x81010002) // Persistent handle for certificate key
+	persistentHandle := tpmutil.Handle(0x81010003) // Persistent handle for certificate key
 
 	// Open TPM device for low-level operations
-	rwc, err := os.OpenFile(c.tpmDevice, os.O_RDWR, 0)
+	rwc, err := c.openTPMDevice()
 	if err != nil {
 		return fmt.Errorf("failed to open TPM device: %w", err)
 	}
@@ -1080,6 +1042,9 @@ func (c *TPMClient) createPersistentCertificateKey(akHandle tpmutil.Handle) erro
 		tpm2.FlushContext(rwc, transientHandle)
 		return fmt.Errorf("failed to persist certificate key: %w", err)
 	}
+
+	// Flush the transient handle now that it's persisted
+	tpm2.FlushContext(rwc, transientHandle)
 
 	log.Printf("✓ Certificate key persisted (handle: 0x%X)", persistentHandle)
 	log.Printf("  Attributes: FixedTPM|FixedParent|SensitiveDataOrigin|UserWithAuth|Sign")
@@ -1192,98 +1157,9 @@ func (c *TPMClient) generateHardwareAttestation(keyAuthorization string, qualify
 	return attestationObject, nil
 }
 
-// generateSimulatedAttestation generates simulated attestation for PoC
-func (c *TPMClient) generateSimulatedAttestation(keyAuthorization string, qualifyingData []byte) (string, error) {
-	log.Printf("Using simulated TPM attestation")
-
-	// Create pubArea for the certified key (the certificate key)
-	pubArea := createPubArea(c.certKey.Public().(*rsa.PublicKey))
-
-	// Create certInfo (TPMS_ATTEST structure)
-	certInfo := createCertInfo(qualifyingData, pubArea)
-
-	// Get AIK certificate
-	aikCert, err := c.createAIKCertificate()
-	if err != nil {
-		return "", fmt.Errorf("failed to create AIK certificate: %w", err)
-	}
-
-	// Sign certInfo with a simulated AK key
-	hash := sha256.Sum256(certInfo)
-
-	// Create a simulated signature using a temporary key
-	// In hardware mode, this would be done by the TPM
-	aikPrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate AIK key: %w", err)
-	}
-
-	signature, err := rsa.SignPKCS1v15(rand.Reader, aikPrivKey, crypto.SHA256, hash[:])
-	if err != nil {
-		return "", fmt.Errorf("failed to sign certInfo: %w", err)
-	}
-
-	// Update AIK certificate to use this key, signed by EK root CA if available
-	// First ensure we have the EK root CA generated
-	if c.ekRootCA == nil {
-		_, _, _, err := c.GetEnrollmentData()
-		if err != nil {
-			return "", fmt.Errorf("failed to get enrollment data: %w", err)
-		}
-	}
-
-	aikCert, err = createAIKCertificateWithKey(c.permanentID, aikPrivKey.Public().(*rsa.PublicKey), c.ekRootCA, c.ekRootCAKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to create AIK certificate with key: %w", err)
-	}
-
-	// Build attestation statement
-	attStmt := map[string]interface{}{
-		"ver":      "2.0",
-		"alg":      int64(-257), // RS256
-		"x5c":      [][]byte{aikCert.Raw},
-		"sig":      signature,
-		"certInfo": certInfo,
-		"pubArea":  pubArea,
-	}
-
-	// Build attestation object
-	attObj := map[string]interface{}{
-		"fmt":     "tpm",
-		"attStmt": attStmt,
-	}
-
-	// Encode to CBOR
-	cborBytes, err := cbor.Marshal(attObj)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal CBOR: %w", err)
-	}
-
-	// Base64url encode
-	attestationObject := base64.RawURLEncoding.EncodeToString(cborBytes)
-
-	log.Printf("✓ Simulated attestation object generated (%d bytes)", len(attestationObject))
-
-	return attestationObject, nil
-}
-
 // GetPermanentID returns the TPM permanent identifier
 func (c *TPMClient) GetPermanentID() string {
 	return c.permanentID
-}
-
-// IsSimulated returns true if using simulated TPM mode
-func (c *TPMClient) IsSimulated() bool {
-	return !c.hardwareMode
-}
-
-// GetPrivateKey returns the certificate private key (simulated mode only)
-// In hardware mode, returns nil as the key is protected inside the TPM
-func (c *TPMClient) GetPrivateKey() *rsa.PrivateKey {
-	if c.hardwareMode {
-		return nil
-	}
-	return c.certKey
 }
 
 // Close closes the TPM connection
@@ -1294,100 +1170,10 @@ func (c *TPMClient) Close() error {
 		}
 		return c.tpm.Close()
 	}
-	// Simulated mode - nothing to close
 	return nil
 }
 
-// Helper functions for TPM structure creation
-
-func createPubArea(pubKey *rsa.PublicKey) []byte {
-	buf := new(bytes.Buffer)
-
-	// Type (RSA)
-	binary.Write(buf, binary.BigEndian, uint16(0x0001)) // TPM_ALG_RSA
-	// NameAlg (SHA256)
-	binary.Write(buf, binary.BigEndian, uint16(0x000B)) // TPM_ALG_SHA256
-	// ObjectAttributes
-	binary.Write(buf, binary.BigEndian, uint32(0x00060472))
-	// AuthPolicy (empty)
-	writeTPM2B(buf, nil)
-	// RSA Parameters
-	binary.Write(buf, binary.BigEndian, uint16(0x0010))   // TPM_ALG_NULL (symmetric)
-	binary.Write(buf, binary.BigEndian, uint16(0x0014))   // TPM_ALG_RSASSA (scheme)
-	binary.Write(buf, binary.BigEndian, uint16(0x000B))   // TPM_ALG_SHA256 (hash alg)
-	binary.Write(buf, binary.BigEndian, uint16(2048))     // keyBits
-	binary.Write(buf, binary.BigEndian, uint32(65537))    // exponent
-	// Unique (RSA modulus)
-	writeTPM2B(buf, pubKey.N.Bytes())
-
-	return buf.Bytes()
-}
-
-func createCertInfo(qualifyingData []byte, pubArea []byte) []byte {
-	buf := new(bytes.Buffer)
-
-	// Magic
-	binary.Write(buf, binary.BigEndian, uint32(0xff544347)) // TPM_GENERATED_VALUE
-	// Type
-	binary.Write(buf, binary.BigEndian, uint16(0x8017)) // TPM_ST_ATTEST_CERTIFY
-	// QualifiedSigner
-	writeTPM2B(buf, []byte("signer"))
-	// ExtraData (this is the key authorization hash!)
-	writeTPM2B(buf, qualifyingData)
-	// ClockInfo
-	binary.Write(buf, binary.BigEndian, uint64(time.Now().Unix()))
-	binary.Write(buf, binary.BigEndian, uint32(1))
-	binary.Write(buf, binary.BigEndian, uint32(0))
-	binary.Write(buf, binary.BigEndian, byte(1))
-	// FirmwareVersion
-	binary.Write(buf, binary.BigEndian, uint64(0x0001000200030004))
-
-	// TPMS_CERTIFY_INFO
-	// Compute the name of the certified object
-	nameAlg := uint16(0x000B) // TPM_ALG_SHA256
-	hasher := sha256.New()
-	hasher.Write(pubArea)
-	digest := hasher.Sum(nil)
-
-	name := make([]byte, 2+len(digest))
-	binary.BigEndian.PutUint16(name[0:2], nameAlg)
-	copy(name[2:], digest)
-
-	writeTPM2B(buf, name)
-	writeTPM2B(buf, []byte("qualified-name"))
-
-	return buf.Bytes()
-}
-
-func writeTPM2B(w *bytes.Buffer, data []byte) {
-	if data == nil {
-		binary.Write(w, binary.BigEndian, uint16(0))
-		return
-	}
-	binary.Write(w, binary.BigEndian, uint16(len(data)))
-	w.Write(data)
-}
-
-func (c *TPMClient) createAIKCertificate() (*x509.Certificate, error) {
-	// Generate a temporary key for the certificate
-	// In a real implementation, this would use the AK public key from attestation parameters
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
-
-	// Ensure we have the EK root CA generated
-	if c.ekRootCA == nil {
-		_, _, _, err := c.GetEnrollmentData()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get enrollment data: %w", err)
-		}
-	}
-
-	return createAIKCertificateWithKey(c.permanentID, privKey.Public().(*rsa.PublicKey), c.ekRootCA, c.ekRootCAKey)
-}
-
-// createAIKCertificateHardware returns the manufacturer pre-provisioned IAK certificate from hardware TPM
+// createAIKCertificateHardware returns the manufacturer pre-provisioned IAK certificate or OpenBao-issued IAK
 func (c *TPMClient) createAIKCertificateHardware() (*x509.Certificate, error) {
 	// In hardware mode, we use the manufacturer pre-provisioned IAK certificate
 	// that was read from TPM NVRAM during initialization
@@ -1404,107 +1190,10 @@ func (c *TPMClient) createAIKCertificateHardware() (*x509.Certificate, error) {
 	return c.iakCert, nil
 }
 
-func createAIKCertificateWithKey(permanentID string, pubKey *rsa.PublicKey, issuerCert *x509.Certificate, issuerKey *rsa.PrivateKey) (*x509.Certificate, error) {
-	// Create AIK certificate signed by EK root CA (or self-signed if no issuer provided)
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().Unix()),
-		Subject: pkix.Name{
-			CommonName:   "AIK Certificate",
-			SerialNumber: permanentID,
-		},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-		IsCA:                  false,
-	}
-
-	// Add permanent identifier to SAN
-	permanentIDOID := asn1.ObjectIdentifier{1, 3, 6, 1, 5, 5, 7, 8, 3}
-	permanentIDValue, _ := asn1.Marshal(permanentID)
-	template.ExtraExtensions = []pkix.Extension{
-		{
-			Id:    permanentIDOID,
-			Value: permanentIDValue,
-		},
-	}
-
-	// Sign with EK root CA if provided, otherwise self-sign
-	var certDER []byte
-	var err error
-
-	if issuerCert != nil && issuerKey != nil {
-		// Signed by EK root CA (proper chain for validation)
-		certDER, err = x509.CreateCertificate(rand.Reader, template, issuerCert, pubKey, issuerKey)
-	} else {
-		// Self-signed fallback
-		signKey, _ := rsa.GenerateKey(rand.Reader, 2048)
-		certDER, err = x509.CreateCertificate(rand.Reader, template, template, pubKey, signKey)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		return nil, err
-	}
-
-	return cert, nil
-}
-
 // GetEnrollmentData returns TPM enrollment information (EK root CA and permanent ID)
-// In hardware mode, uses real manufacturer CA from EK certificate
-// In simulation mode, generates a simulated root CA
 func (c *TPMClient) GetEnrollmentData() (ekRootCAPEM, ekRootCAName, description string, err error) {
-	if c.hardwareMode && c.ekRootCA != nil {
-		// Hardware mode: Use extracted manufacturer root CA
-		rootPEM := pem.EncodeToMemory(&pem.Block{
-			Type:  "CERTIFICATE",
-			Bytes: c.ekRootCA.Raw,
-		})
-
-		ekRootCAPEM = string(rootPEM)
-		ekRootCAName = c.manufacturerCA
-		description = fmt.Sprintf("Hardware TPM (%s) with permanent ID: %s", c.manufacturerCA, c.permanentID)
-
-		log.Printf("✓ Using hardware TPM enrollment data (manufacturer: %s)", c.manufacturerCA)
-		return ekRootCAPEM, ekRootCAName, description, nil
-	}
-
-	// Simulation mode: Generate simulated EK root CA if not already created
 	if c.ekRootCA == nil {
-		log.Printf("Generating simulated EK root CA for PoC...")
-
-		rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			return "", "", "", fmt.Errorf("failed to generate root key: %w", err)
-		}
-
-		rootTemplate := &x509.Certificate{
-			SerialNumber: big.NewInt(1),
-			Subject: pkix.Name{
-				CommonName:   "Simulated TPM Root CA",
-				Organization: []string{"Simulated TPM Manufacturer"},
-			},
-			NotBefore:             time.Now().Add(-1 * time.Hour),
-			NotAfter:              time.Now().Add(365 * 24 * time.Hour),
-			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-			BasicConstraintsValid: true,
-			IsCA:                  true,
-		}
-
-		rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
-		if err != nil {
-			return "", "", "", fmt.Errorf("failed to create root certificate: %w", err)
-		}
-
-		c.ekRootCA, err = x509.ParseCertificate(rootDER)
-		if err != nil {
-			return "", "", "", fmt.Errorf("failed to parse root certificate: %w", err)
-		}
-		c.ekRootCAKey = rootKey
+		return "", "", "", fmt.Errorf("manufacturer root CA not available")
 	}
 
 	rootPEM := pem.EncodeToMemory(&pem.Block{
@@ -1513,9 +1202,9 @@ func (c *TPMClient) GetEnrollmentData() (ekRootCAPEM, ekRootCAName, description 
 	})
 
 	ekRootCAPEM = string(rootPEM)
-	ekRootCAName = "simulated-tpm"
-	description = fmt.Sprintf("Simulated TPM device with permanent ID: %s", c.permanentID)
+	ekRootCAName = c.manufacturerCA
+	description = fmt.Sprintf("TPM (%s) with permanent ID: %s", c.manufacturerCA, c.permanentID)
 
-	log.Printf("Using simulated TPM enrollment data")
+	log.Printf("✓ Using TPM enrollment data (manufacturer: %s)", c.manufacturerCA)
 	return ekRootCAPEM, ekRootCAName, description, nil
 }

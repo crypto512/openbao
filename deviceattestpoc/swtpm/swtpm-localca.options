@@ -1,0 +1,2 @@
+# Options passed to swtpm_localca when invoked by swtpm_setup
+--configfile /root/.config/swtpm-localca.conf

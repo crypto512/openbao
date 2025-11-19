@@ -471,11 +471,19 @@ func (c *OpenBaoClient) buildJWS(url, kid string, payload []byte, includeJWK boo
 
 	if includeJWK {
 		pubKey := c.accountKey.Public().(*ecdsa.PublicKey)
+
+		// EC P-256 coordinates must be exactly 32 bytes
+		// pubKey.X.Bytes() and pubKey.Y.Bytes() omit leading zeros, so we need to pad them
+		xBytes := make([]byte, 32)
+		yBytes := make([]byte, 32)
+		pubKey.X.FillBytes(xBytes)
+		pubKey.Y.FillBytes(yBytes)
+
 		protected["jwk"] = map[string]string{
 			"crv": "P-256",
 			"kty": "EC",
-			"x":   base64.RawURLEncoding.EncodeToString(pubKey.X.Bytes()),
-			"y":   base64.RawURLEncoding.EncodeToString(pubKey.Y.Bytes()),
+			"x":   base64.RawURLEncoding.EncodeToString(xBytes),
+			"y":   base64.RawURLEncoding.EncodeToString(yBytes),
 		}
 	} else {
 		protected["kid"] = kid
@@ -896,10 +904,12 @@ func (c *OpenBaoClient) findMatchingEKRootCA(ctx context.Context, ekCert *x509.C
 	log.Printf("EK certificate issuer: %s", issuer)
 
 	// List of common manufacturer root CA names to try
-	manufacturerNames := []string{"stmicro", "intel", "infineon", "amd", "nuvoton"}
+	manufacturerNames := []string{"swtpm-manufacturer", "stmicro", "intel", "infineon", "amd", "nuvoton"}
 
 	// Try to prioritize based on issuer string
-	if strings.Contains(strings.ToLower(issuer), "stm") {
+	if strings.Contains(strings.ToLower(issuer), "swtpm") {
+		manufacturerNames = append([]string{"swtpm-manufacturer"}, manufacturerNames...)
+	} else if strings.Contains(strings.ToLower(issuer), "stm") {
 		manufacturerNames = append([]string{"stmicro"}, manufacturerNames...)
 	} else if strings.Contains(strings.ToLower(issuer), "intel") {
 		manufacturerNames = append([]string{"intel"}, manufacturerNames...)
@@ -937,6 +947,11 @@ func (c *OpenBaoClient) findMatchingEKRootCA(ctx context.Context, ekCert *x509.C
 		// Verification failed, might be due to intermediate CA
 		// For PoC: If the root CA subject matches the expected manufacturer, accept it
 		// This is a simplified check - in production, load and verify intermediate CAs
+		if strings.Contains(strings.ToLower(rootCA.Subject.String()), "swtpm") &&
+		   strings.Contains(strings.ToLower(issuer), "swtpm") {
+			log.Printf("✓ EK cert issuer matches manufacturer (intermediate CA present): %s", name)
+			return rootCA, name, nil
+		}
 		if strings.Contains(strings.ToLower(rootCA.Subject.String()), "stm") &&
 		   strings.Contains(strings.ToLower(issuer), "stm") {
 			log.Printf("✓ EK cert issuer matches manufacturer (intermediate CA present): %s", name)

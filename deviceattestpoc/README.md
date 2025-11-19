@@ -14,7 +14,7 @@ This PoC demonstrates hardware-backed device attestation where certificate priva
   - IAK Mode: Uses manufacturer-provisioned IAK certificates from TPM NVRAM
   - AK Mode: Creates persistent Attestation Key, receives IAK certificate from OpenBao
 - **ACME Integration**: Full ACME flow with `device-attest-01` challenge type
-- **Simulator Support**: Software simulation for testing without hardware TPM
+- **SWTPM Support**: Software TPM 2.0 emulator with manufacturer CA integration for testing
 
 ## Architecture
 
@@ -29,8 +29,9 @@ This PoC demonstrates hardware-backed device attestation where certificate priva
 │  └──────────────┘  └──────────────┘  └────────────────────────────┘│
 │                                                                    │
 │  Persistent Handles:                                               │
-│  • 0x81010001: Persistent AK (AK mode only)                        │
-│  • 0x81010002: Certificate Key (both modes)                        │
+│  • 0x81010001: Endorsement Key (EK)                                │
+│  • 0x81010002: Attestation Key (AK, AK mode only)                  │
+│  • 0x81010003: Certificate Key (both modes)                        │
 │  • 0x81010012: IAK Handle (IAK mode, vendor-specific)              │
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -114,8 +115,8 @@ make run-client-hw-ak     # Default, or --attest-mode=ak
 ```
 
 **Process**:
-1. Create persistent AK at handle 0x81010001 using `CreatePrimary`
-2. Create TPM-protected certificate key at 0x81010002
+1. Create persistent AK at handle 0x81010002 using `CreatePrimary`
+2. Create TPM-protected certificate key at 0x81010003
 3. Send AK public key during enrollment
 4. Receive IAK certificate from OpenBao (365-day validity)
 5. Use TPM2_Certify with AK to prove key attributes
@@ -124,71 +125,123 @@ make run-client-hw-ak     # Default, or --attest-mode=ak
 **Advantages**:
 - ✅ Works with any TPM that has EK certificate
 - ✅ IAK certificate validity controlled by OpenBao
-- ✅ AK persisted at handle 0x81010001 (survives reboot)
+- ✅ AK persisted at handle 0x81010002 (survives reboot)
 - ✅ Automatic mode if manufacturer IAK not present
 
 **Requirements**:
 - ❌ Requires EK enrollment with OpenBao first
 - ❌ Adds OpenBao PKI root to trust anchors
 
-### Simulator Mode
+### SWTPM Mode (Software TPM)
 
-**Use When**: Testing without hardware TPM
+**Use When**: Testing without physical hardware TPM
 
+```bash
+docker compose up --build    # Includes swtpm container
 ```
-make run-client           # Auto-detects no hardware TPM
+
+**How It Works**:
+- SWTPM is a software TPM 2.0 emulator (libtpms + swtpm)
+- **Acts exactly like a real hardware TPM** with full TPM 2.0 command support
+- Includes manufacturer CA integration:
+  - Root CA: `SWTPM Manufacturer Root CA`
+  - Intermediate CA: `SWTPM TPM EK Intermediate CA`
+  - EK certificate signed by intermediate CA (just like real TPMs)
+- Client connects via TCP using socat proxy that creates `/dev/tpmrm0` symlink
+- Persistent storage in `/tmp/swtpm-state` (survives container restarts)
+
+**Architecture**:
+```
+┌─────────────┐    socat     ┌─────────────┐
+│   Client    │   TCP proxy  │   SWTPM     │
+│ Container   │◄────────────►│  Container  │
+│             │   port 2321  │             │
+│/dev/tpmrm0  │              │ TPM 2.0     │
+│  symlink    │              │ Emulator    │
+└─────────────┘              └─────────────┘
+                                    ▲
+                                    │
+                                    │ Manufacturer CA
+                             ┌──────┴──────┐
+                             │ ca/swtpm-   │
+                             │ manufacturer│
+                             └─────────────┘
 ```
 
-**⚠️ Security Warning**:
-- Uses external RSA keys generated with `rsa.GenerateKey()`
-- Private keys exist in software memory
-- Keys exported to PEM files on disk
-- **For testing only** - Not suitable for production
+**Manufacturer CA Files** (mounted in swtpm container):
+- `ca/swtpm-manufacturer/RootCA/SWTPM Manufacturer Root CA.crt`
+- `ca/swtpm-manufacturer/IntermediateCA/SWTPM TPM EK Intermediate CA.crt`
+- Private keys (unencrypted) used by swtpm_localca to sign EK certificates
+
+**Advantages**:
+- ✅ Full TPM 2.0 command support (not simulation)
+- ✅ Manufacturer CA hierarchy like real hardware TPMs
+- ✅ EK certificate chains to known manufacturer root
+- ✅ Persistent handles survive container restarts
+- ✅ Works in Docker/containers
+- ✅ Perfect for testing, CI/CD, and development
+
+**Limitations**:
+- ⚠️ No hardware security - keys in container memory
+- ⚠️ Not physically bound to device
+- ⚠️ For testing and development only
 
 ## Quick Start
 
 ### Prerequisites
 
 - Docker and Docker Compose
-- OpenBao binary at `../bin/bao`
 - For hardware TPM: Linux with `/dev/tpmrm0` or `/dev/tpm0`
 
-### Step 1: Build Client
+### Step 1: Generate Manufacturer CAs
 
 ```bash
 cd deviceattestpoc
-make build-client
+
+# Generate SWTPM manufacturer CA (for software TPM)
+cd ca/swtpm-manufacturer
+./generate-ca.sh
+cd ../..
+
+# Optional: Generate STMicro CA (for hardware TPM testing)
+cd ca/stmicro
+./generate-ca.sh
+cd ../..
 ```
 
-### Step 2: Start Server Infrastructure
+### Step 2: Start Complete Stack (Docker Compose)
 
 ```bash
-# Terminal 1
-make run-server
+docker compose up --build
 ```
 
-This starts OpenBao with ACME and the gRPC attestation server.
+This starts:
+- **openbao**: Secrets management with PKI and ACME
+- **init**: Initializes OpenBao (unseals, enables PKI/ACME, configures policies)
+- **tpm1**: SWTPM software TPM 2.0 with manufacturer CA
+- **server**: gRPC attestation server
+- **cert-client**: Client that uses SWTPM for certificate issuance
 
-### Step 3: Run Client (Choose Mode)
+Watch the logs for the complete end-to-end flow!
 
-**Simulator Mode** (works anywhere):
+### Step 3: Manual Client Testing (Optional)
+
+**SWTPM Mode** (using Docker containers):
 ```bash
-# Terminal 2
-make run-client
+# Already running from Step 2
+docker compose logs cert-client
 ```
 
 **Hardware TPM - IAK Mode** (requires manufacturer IAK):
 ```bash
-# Terminal 2
-sudo ./clear_ak.sh              # Clear old keys
-make run-client-hw-iak
+make build-client
+sudo ./bin/tpm-acme-client -clear-handles -attest-mode=iak -server=localhost:50051
 ```
 
 **Hardware TPM - AK Mode** (works with any TPM):
 ```bash
-# Terminal 2
-sudo ./clear_ak.sh              # Clear old keys
-make run-client-hw-ak
+make build-client
+sudo ./bin/tpm-acme-client -clear-handles -attest-mode=ak -server=localhost:50051
 ```
 
 ### Expected Output
@@ -197,9 +250,9 @@ make run-client-hw-ak
 ═══════════════════════════════════════════════
 Initializing TPM...
 ═══════════════════════════════════════════════
-✓ Hardware TPM detected and opened successfully
-✓ Persistent AK created successfully (handle: 0x81010001)
-✓ Certificate key persisted (handle: 0x81010002)
+✓ TPM detected and opened successfully
+✓ Persistent AK created successfully (handle: 0x81010002)
+✓ Certificate key persisted (handle: 0x81010003)
   Attributes: FixedTPM|FixedParent|SensitiveDataOrigin|UserWithAuth|Sign
   Security: Private key NEVER leaves TPM, cannot be exported
 
@@ -249,19 +302,19 @@ Retrieving certificate...
 
 ### Phase 1: TPM Initialization
 
-1. **Client opens TPM** (hardware or simulator)
+1. **Client opens TPM** (hardware or SWTPM)
    - Hardware: `/dev/tpmrm0` or `/dev/tpm0`
-   - Simulator: Built-in software TPM
+   - SWTPM: `/dev/tpmrm0` symlink via socat TCP proxy
 
 2. **Read/Create IAK**:
    - **IAK Mode**: Read IAK certificate from NVRAM 0x01C00012
-   - **AK Mode**: Create persistent AK at handle 0x81010001
+   - **AK Mode**: Create persistent AK at handle 0x81010002
 
 3. **Create TPM-Protected Certificate Key**:
    - Generate key INSIDE TPM using `CreatePrimary`
    - Parent: Owner hierarchy
    - Attributes: FixedTPM, FixedParent, SensitiveDataOrigin, Sign
-   - Persist at handle 0x81010002
+   - Persist at handle 0x81010003
    - Private key **never leaves TPM**
 
 ### Phase 2: TPM Enrollment
@@ -280,7 +333,7 @@ Retrieving certificate...
 
 6. **Generate CSR**:
    - Create CSR for `vpn-client-001.example.com`
-   - Sign CSR using TPM2_Sign with certificate key (0x81010002)
+   - Sign CSR using TPM2_Sign with certificate key (0x81010003)
    - Private key never exported from TPM
 
 7. **Client sends request** to server:
@@ -297,7 +350,7 @@ Retrieving certificate...
 9. **Client generates attestation**:
    - Compute key authorization: `SHA256(token || '.' || thumbprint)`
    - Execute **TPM2_Certify**:
-     - Object to certify: Certificate key (0x81010002)
+     - Object to certify: Certificate key (0x81010003)
      - Signing key: IAK or AK
      - Qualifying data: Key authorization hash
    - Generates attestation containing:
@@ -363,8 +416,11 @@ openssl x509 -in ./vpn-client.pem -text | grep -A2 "Subject Alternative Name"
 ### Clear TPM Keys
 
 ```bash
-# Clear persistent handles for fresh start
-sudo ./clear_ak.sh
+# Clear persistent handles for fresh start (hardware TPM)
+sudo ./bin/tpm-acme-client -clear-handles
+
+# Or pass it with other flags
+sudo ./bin/tpm-acme-client -clear-handles -attest-mode=ak
 ```
 
 ## Configuration
@@ -374,11 +430,10 @@ sudo ./clear_ak.sh
 | Target | Description |
 |--------|-------------|
 | `make build-client` | Build tpm-acme-client binary |
-| `make run-server` | Start OpenBao + gRPC server |
-| `make run-client` | Run client (auto-detects TPM or simulator) |
+| `docker compose up --build` | Start complete stack (OpenBao + SWTPM + Server + Client) |
+| `docker compose up openbao init server` | Start server infrastructure only |
 | `make run-client-hw-iak` | Hardware TPM with IAK mode |
 | `make run-client-hw-ak` | Hardware TPM with AK mode |
-| `make run-client-sim` | Force simulator mode |
 
 ### Command-Line Flags
 
@@ -394,8 +449,8 @@ Flags:
         Certificate common name (default "vpn-client-001.example.com")
   -attest-mode string
         Attestation mode: iak or ak (default "ak")
-  -simulate
-        Force simulation mode (no hardware TPM)
+  -clear-handles
+        Clear TPM persistent handles before running (for automation)
   -help
         Show this help message
 ```
@@ -547,9 +602,9 @@ sudo ./bin/tpm-acme-client
 
 **Error**: `failed to make certificate key persistent: handle already in use`
 
-**Solution**: Clear old handles:
+**Solution**: Clear old handles before running:
 ```bash
-sudo ./clear_ak.sh
+sudo ./bin/tpm-acme-client -clear-handles -attest-mode=ak
 ```
 
 ### Attestation Validation Fails

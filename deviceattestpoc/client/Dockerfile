@@ -35,16 +35,17 @@ RUN CGO_ENABLED=1 GOOS=linux go build -o /client .
 FROM alpine:3.22
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates libc6-compat
+RUN apk add --no-cache ca-certificates libc6-compat socat
 
 # Create directories
 RUN mkdir -p /certs
 
-# Copy client binary
+# Copy client binary and entrypoint
 COPY --from=builder /client /client
+COPY --chmod=755 client/entrypoint.sh /entrypoint.sh
 
 WORKDIR /
 
-# The client will auto-detect hardware TPM at /dev/tpmrm0 or /dev/tpm0
-# If no hardware TPM is available, it will use simulated attestation mode
+# Use entrypoint to set up socat proxy for swtpm
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/client"]

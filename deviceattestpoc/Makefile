@@ -1,21 +1,21 @@
 # Makefile for ACME Device Attestation PoC
 
-.PHONY: help build-client build-server clean test run-docker run-server run-client-sim run-client-hw-iak run-client-hw-ak
+.PHONY: help build-client build-server clean run-server run-client-swtpm-iak run-client-swtpm-ak run-client-hw-iak run-client-hw-ak run-test-swtpm-ak
 
 help:
 	@echo "ACME Device Attestation PoC - Make targets:"
 	@echo ""
-	@echo "  make build-client      - Build standalone client binary"
-	@echo "  make build-server      - Build server binary"
-	@echo "  make clean            - Clean built binaries"
+	@echo "  make build-client         - Build standalone client binary"
+	@echo "  make build-server         - Build server binary"
+	@echo "  make clean                - Clean built binaries and containers"
 	@echo ""
-	@echo "  make run-server        - Start server infrastructure only"
-	@echo "  make run-client-sim    - Run client in SIMULATION mode"
-	@echo "  make run-client-hw-iak - Run client with HARDWARE TPM in IAK mode (requires sudo)"
-	@echo "  make run-client-hw-ak  - Run client with HARDWARE TPM in AK mode (requires sudo)"
+	@echo "  make run-server           - Start server infrastructure (OpenBao + gRPC server + swtpm)"
+	@echo "  make run-client-swtpm-iak - Run client with SWTPM in IAK mode"
+	@echo "  make run-client-swtpm-ak  - Run client with SWTPM in AK mode"
+	@echo "  make run-client-hw-iak    - Run client with HARDWARE TPM in IAK mode (requires sudo)"
+	@echo "  make run-client-hw-ak     - Run client with HARDWARE TPM in AK mode (requires sudo)"
 	@echo ""
-	@echo "  make run-docker        - Run full PoC in Docker (simulated TPM)"
-	@echo "  make test              - Run full PoC test"
+	@echo "  make run-test-swtpm-ak    - Run automated end-to-end test with swtpm in AK mode"
 	@echo ""
 
 # Detect host OS and architecture
@@ -73,10 +73,11 @@ endif
 	@echo ""
 	@echo "Usage:"
 	@echo "  ./bin/tpm-acme-client -help                      # Show help"
-	@echo "  ./bin/tpm-acme-client -simulate                  # Simulation mode"
 ifeq ($(GOOS),linux)
 	@echo "  sudo ./bin/tpm-acme-client -attest-mode iak      # Hardware TPM (IAK mode)"
 	@echo "  sudo ./bin/tpm-acme-client -attest-mode ak       # Hardware TPM (AK mode)"
+	@echo "  TPM2TOOLS_TCTI=swtpm:host=tpm1,port=2321 \\"
+	@echo "    ./bin/tpm-acme-client -attest-mode ak          # Use swtpm from docker"
 endif
 	@echo ""
 
@@ -98,22 +99,33 @@ clean:
 	@docker compose down -v 2>/dev/null || true
 	@echo "✓ Cleaned"
 
-# Run full PoC in Docker (simulated TPM)
-run-docker:
-	@echo "Starting PoC in Docker (simulated TPM mode)..."
-	@docker compose up --build
-
 # Run only server infrastructure (for use with standalone client)
 run-server:
 	@echo "Starting server infrastructure..."
-	@echo "Press Ctrl+C to stop when done testing"
-	@docker compose up --build openbao init server
-
-# Run standalone client in SIMULATION mode
-run-client-sim: build-client
-	@echo "Running client in SIMULATION mode..."
+	@echo "This will start:"
+	@echo "  - OpenBao server with ACME support"
+	@echo "  - gRPC certificate server"
+	@echo "  - Software TPM 2.0 (swtpm) with manufacturer CA"
 	@echo ""
-	@./bin/tpm-acme-client -simulate
+	@echo "Press Ctrl+C to stop when done testing"
+	@echo ""
+	@docker compose up --build openbao init server tpm1
+
+# Run client with SWTPM in IAK mode (uses Docker client container)
+run-client-swtpm-iak:
+	@echo "Running client with SWTPM in IAK mode..."
+	@echo "Note: Server infrastructure must be running (make run-server)"
+	@echo "Mode: Using manufacturer-provisioned IAK certificate"
+	@echo ""
+	@docker compose run --rm client /client -attest-mode iak
+
+# Run client with SWTPM in AK mode (uses Docker client container)
+run-client-swtpm-ak:
+	@echo "Running client with SWTPM in AK mode..."
+	@echo "Note: Server infrastructure must be running (make run-server)"
+	@echo "Mode: Using NewAK with OpenBao-issued IAK certificate"
+	@echo ""
+	@docker compose run --rm client /client -attest-mode ak
 
 # Run standalone client with HARDWARE TPM in IAK mode
 run-client-hw-iak: build-client
@@ -131,9 +143,9 @@ run-client-hw-ak: build-client
 	@echo ""
 	@sudo ./bin/tpm-acme-client -attest-mode ak
 
-# Test full PoC
-test:
-	@echo "Running PoC test..."
+# Automated end-to-end test with SWTPM in AK mode
+run-test-swtpm-ak:
+	@echo "Running automated end-to-end test with SWTPM in AK mode..."
 	@docker compose up --build -d
 	@sleep 20
 	@echo ""

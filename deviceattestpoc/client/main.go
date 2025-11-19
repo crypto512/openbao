@@ -5,12 +5,11 @@ package main
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,12 +21,12 @@ import (
 
 func main() {
 	// Command-line flags
-	simulateTPM := flag.Bool("simulate", false, "Force simulation mode (no hardware TPM)")
 	attestMode := flag.String("attest-mode", "", "Attestation mode: 'iak' (use manufacturer IAK cert) or 'ak' (create NewAK with OpenBao-issued IAK cert)")
 	serverAddr := flag.String("server", "", "Server address (default: localhost:50051 or SERVER_ADDR env)")
 	tpmDevice := flag.String("tpm", "", "TPM device path (default: /dev/tpmrm0 or TPM_DEVICE env)")
 	commonName := flag.String("cn", "", "Certificate common name (default: vpn-client-001.example.com or CERT_COMMON_NAME env)")
 	certOutput := flag.String("cert-output", "", "Certificate output file path (default: ./vpn-client.pem or CERT_OUTPUT env)")
+	clearHandles := flag.Bool("clear-handles", false, "Clear TPM persistent handles before running (for automation/testing)")
 	showHelp := flag.Bool("help", false, "Show help message")
 
 	flag.Parse()
@@ -39,7 +38,6 @@ func main() {
 		fmt.Println("  tpm-acme-client [options]")
 		fmt.Println("")
 		fmt.Println("Options:")
-		fmt.Println("  -simulate           Force simulation mode (no hardware TPM)")
 		fmt.Println("  -attest-mode <mode> Attestation mode:")
 		fmt.Println("                        'iak' = Use manufacturer-provisioned IAK certificate")
 		fmt.Println("                        'ak'  = Create NewAK and get OpenBao-issued IAK certificate")
@@ -47,11 +45,13 @@ func main() {
 		fmt.Println("  -tpm <device>       TPM device path (default: /dev/tpmrm0)")
 		fmt.Println("  -cn <name>          Certificate common name (default: vpn-client-001.example.com)")
 		fmt.Println("  -cert-output <path> Certificate output file (default: ./vpn-client.pem)")
+		fmt.Println("  -clear-handles      Clear TPM persistent handles before running (for automation)")
 		fmt.Println("  -help               Show this help message")
 		fmt.Println("")
 		fmt.Println("Environment Variables:")
 		fmt.Println("  SERVER_ADDR         Server address (overridden by -server)")
 		fmt.Println("  TPM_DEVICE          TPM device path (overridden by -tpm)")
+		fmt.Println("  TPM2TOOLS_TCTI      TPM TCTI (e.g., swtpm:host=tpm1,port=2321)")
 		fmt.Println("  CERT_COMMON_NAME    Certificate common name (overridden by -cn)")
 		fmt.Println("  CERT_OUTPUT         Certificate output file (overridden by -cert-output)")
 		fmt.Println("")
@@ -62,8 +62,8 @@ func main() {
 		fmt.Println("  # AK mode with hardware TPM:")
 		fmt.Println("  sudo ./tpm-acme-client -attest-mode ak")
 		fmt.Println("")
-		fmt.Println("  # Force simulation mode:")
-		fmt.Println("  ./tpm-acme-client -simulate")
+		fmt.Println("  # Use swtpm container:")
+		fmt.Println("  TPM2TOOLS_TCTI=swtpm:host=tpm1,port=2321 ./tpm-acme-client -attest-mode ak")
 		fmt.Println("")
 		fmt.Println("  # Use custom server with IAK mode:")
 		fmt.Println("  sudo ./tpm-acme-client -attest-mode iak -server server.example.com:50051")
@@ -117,19 +117,13 @@ func main() {
 	log.Printf("ACME Device Attestation Client")
 	log.Printf("==============================================")
 	log.Printf("Server: %s", finalServerAddr)
-	if *simulateTPM {
-		log.Printf("Mode: SIMULATION (forced)")
-		finalTPMDevice = "simulate"
-	} else {
-		log.Printf("TPM Device: %s", finalTPMDevice)
-		log.Printf("Mode: HARDWARE TPM")
-		if *attestMode != "" {
-			log.Printf("Attestation Mode: %s", strings.ToUpper(*attestMode))
-			if *attestMode == "iak" {
-				log.Printf("  → Using manufacturer-provisioned IAK certificate")
-			} else {
-				log.Printf("  → Using NewAK with OpenBao-issued IAK certificate")
-			}
+	log.Printf("TPM Device: %s", finalTPMDevice)
+	if *attestMode != "" {
+		log.Printf("Attestation Mode: %s", strings.ToUpper(*attestMode))
+		if *attestMode == "iak" {
+			log.Printf("  → Using manufacturer-provisioned IAK certificate")
+		} else {
+			log.Printf("  → Using NewAK with OpenBao-issued IAK certificate")
 		}
 	}
 	log.Printf("Certificate CN: %s", finalCommonName)
@@ -163,6 +157,19 @@ func main() {
 	}
 
 	log.Printf("Using CA certificates from: %s", caBasePath)
+
+	// Clear TPM persistent handles if requested
+	if *clearHandles {
+		log.Println("")
+		log.Println("═══════════════════════════════════════════════")
+		log.Println("Clearing TPM persistent handles...")
+		log.Println("═══════════════════════════════════════════════")
+		if err := clearTPMHandles(finalTPMDevice); err != nil {
+			log.Fatalf("Failed to clear TPM handles: %v", err)
+		}
+		log.Println("✓ TPM persistent handles cleared")
+		log.Println("")
+	}
 
 	// Initialize TPM client
 	log.Println("")
@@ -405,23 +412,6 @@ func main() {
 	}
 	log.Printf("✓ Certificate saved to: %s", finalCertOutput)
 
-	// Save private key in simulated mode
-	var keyPath string
-	if tpmClient.IsSimulated() {
-		privKey := tpmClient.GetPrivateKey()
-		if privKey != nil {
-			keyPath = strings.TrimSuffix(finalCertOutput, filepath.Ext(finalCertOutput)) + "-key.pem"
-			keyPEM := pem.EncodeToMemory(&pem.Block{
-				Type:  "RSA PRIVATE KEY",
-				Bytes: x509.MarshalPKCS1PrivateKey(privKey),
-			})
-			if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
-				log.Fatalf("Failed to save private key: %v", err)
-			}
-			log.Printf("✓ Private key saved to: %s", keyPath)
-		}
-	}
-
 	log.Println("")
 	log.Printf("==============================================")
 	log.Printf("✓ Certificate Generated and Ready for Use")
@@ -433,30 +423,46 @@ func main() {
 	log.Printf("  • Order ID: %s", resp.OrderId)
 	log.Println("")
 
-	if tpmClient.IsSimulated() {
-		log.Printf("Certificate Files (Simulated TPM):")
-		log.Printf("  • Certificate: %s", finalCertOutput)
-		log.Printf("  • Private Key: %s", keyPath)
-		log.Println("")
-		log.Printf("Inspect the certificate:")
-		log.Printf("  openssl x509 -in %s -text -noout", finalCertOutput)
-		log.Println("")
-		log.Printf("Verify certificate and key match:")
-		log.Printf("  openssl x509 -in %s -noout -modulus | openssl md5", finalCertOutput)
-		log.Printf("  openssl rsa -in %s -noout -modulus | openssl md5", keyPath)
-		log.Println("")
-		log.Printf("Note: Private key saved because TPM is simulated.")
-		log.Printf("      In hardware mode, the key stays protected inside the TPM.")
-	} else {
-		log.Printf("Certificate Files (Hardware TPM):")
-		log.Printf("  • Certificate: %s", finalCertOutput)
-		log.Printf("  • Private Key: Protected inside TPM (not exported)")
-		log.Println("")
-		log.Printf("Inspect the certificate:")
-		log.Printf("  openssl x509 -in %s -text -noout", finalCertOutput)
-		log.Println("")
-		log.Printf("Note: The private key is sealed inside the TPM hardware.")
-		log.Printf("      The TPM will perform signing operations for VPN use.")
-	}
+	log.Printf("Certificate Files:")
+	log.Printf("  • Certificate: %s", finalCertOutput)
+	log.Printf("  • Private Key: Protected inside TPM (not exported)")
 	log.Println("")
+	log.Printf("Inspect the certificate:")
+	log.Printf("  openssl x509 -in %s -text -noout", finalCertOutput)
+	log.Println("")
+	log.Printf("Note: The private key is sealed inside the TPM.")
+	log.Printf("      The TPM will perform signing operations for VPN use.")
+	log.Println("")
+}
+
+// clearTPMHandles clears TPM persistent handles for AK and certificate key
+// This is useful for automation and testing to ensure clean state
+func clearTPMHandles(tpmDevice string) error {
+	handles := []string{
+		"0x81010002", // AK handle
+		"0x81010003", // Certificate key handle
+	}
+
+	for _, handle := range handles {
+		log.Printf("Clearing persistent handle %s...", handle)
+
+		cmd := exec.Command("tpm2_evictcontrol", "-C", "o", "-c", handle)
+		// Ignore errors as handle may not exist
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			// Check if error is because handle doesn't exist (this is OK)
+			if strings.Contains(string(output), "handle does not exist") ||
+			   strings.Contains(string(output), "not found") ||
+			   strings.Contains(string(output), "invalid handle") {
+				log.Printf("  Handle %s not present (this is fine)", handle)
+				continue
+			}
+			// For other errors, log but continue
+			log.Printf("  Warning: Failed to clear handle %s: %v (continuing anyway)", handle, err)
+			continue
+		}
+		log.Printf("  ✓ Cleared handle %s", handle)
+	}
+
+	return nil
 }
