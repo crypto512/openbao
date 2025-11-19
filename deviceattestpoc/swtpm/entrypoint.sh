@@ -1,7 +1,4 @@
 #!/bin/bash
-# Copyright (c) OpenBao a Series of LF Projects, LLC
-# SPDX-License-Identifier: MPL-2.0
-
 # SWTPM Entrypoint Script with Manufacturer CA Integration
 # This script initializes swtpm with proper EK certificates signed by manufacturer CA
 

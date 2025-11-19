@@ -1,6 +1,4 @@
 #!/bin/sh
-# Copyright (c) OpenBao a Series of LF Projects, LLC
-# SPDX-License-Identifier: MPL-2.0
 
 # Client Entrypoint - Sets up socat proxy for swtpm TCP connection
 

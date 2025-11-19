@@ -1,6 +1,4 @@
 #!/bin/bash
-# Copyright (c) OpenBao a Series of LF Projects, LLC
-# SPDX-License-Identifier: MPL-2.0
 
 # Generate SWTPM Manufacturer Root CA and Intermediate CA
 # This script creates a complete CA hierarchy for swtpm EK certificates

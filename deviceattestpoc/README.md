@@ -642,6 +642,4 @@ curl http://localhost:8200/v1/sys/health
 
 ## License
 
-Copyright (c) OpenBao a Series of LF Projects, LLC
 
-SPDX-License-Identifier: MPL-2.0
