@@ -1,0 +1,31 @@
+# Device Attestation PoC - Build Context Optimization
+# Reduces build context size and improves layer caching
+
+# Build outputs (Makefile standalone builds)
+bin/
+
+# Log files
+*.log
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts
+testdata/
+.test/
+
+# Environment files
+.env
+.env.*
+
+# Temporary files
+tmp/
+temp/
+
+# Docker
+docker-compose*.yml
+.dockerignore

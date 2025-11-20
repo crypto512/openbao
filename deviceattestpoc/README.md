@@ -190,7 +190,7 @@ docker compose up --build    # Includes swtpm container
 
 ### Prerequisites
 
-- Docker and Docker Compose
+- Docker and Docker Compose v2
 - For hardware TPM: Linux with `/dev/tpmrm0` or `/dev/tpm0`
 
 ### Step 1: Generate Manufacturer CAs
@@ -209,39 +209,53 @@ cd ca/stmicro
 cd ../..
 ```
 
-### Step 2: Start Complete Stack (Docker Compose)
+### Step 2: Build Containers (One-Time Setup)
 
 ```bash
-docker compose up --build
+make build
 ```
 
-This starts:
-- **openbao**: Secrets management with PKI and ACME
-- **init**: Initializes OpenBao (unseals, enables PKI/ACME, configures policies)
-- **tpm1**: SWTPM software TPM 2.0 with manufacturer CA
-- **server**: gRPC attestation server
-- **cert-client**: Client that uses SWTPM for certificate issuance
+All containers use Docker layer caching for fast incremental builds. This optimization reduces build times significantly:
+- OpenBao: 1GB+ build context reduced to ~50MB via `.dockerignore`
+- Client/Server: Proto generation, dependencies, and source code in separate cached layers
 
-Watch the logs for the complete end-to-end flow!
+### Step 3: Run End-to-End Test
 
-### Step 3: Manual Client Testing (Optional)
-
-**SWTPM Mode** (using Docker containers):
+**Automated Test with SWTPM**:
 ```bash
-# Already running from Step 2
-docker compose logs cert-client
+make run-test-swtpm-ak
+```
+
+This runs the complete flow and displays the result.
+
+### Step 4: Interactive Testing
+
+**Start Server Infrastructure**:
+```bash
+make run-server
+# Starts OpenBao + gRPC server + SWTPM (Ctrl+C to stop)
+```
+
+**Run Clients** (in separate terminal):
+
+**SWTPM - IAK Mode**:
+```bash
+make run-client-swtpm-iak
+```
+
+**SWTPM - AK Mode** (recommended):
+```bash
+make run-client-swtpm-ak
 ```
 
 **Hardware TPM - IAK Mode** (requires manufacturer IAK):
 ```bash
-make build-client
-sudo ./bin/tpm-acme-client -clear-handles -attest-mode=iak -server=localhost:50051
+make run-client-hw-iak
 ```
 
 **Hardware TPM - AK Mode** (works with any TPM):
 ```bash
-make build-client
-sudo ./bin/tpm-acme-client -clear-handles -attest-mode=ak -server=localhost:50051
+make run-client-hw-ak
 ```
 
 ### Expected Output
@@ -413,14 +427,15 @@ openssl x509 -in ./vpn-client.pem -text -noout
 openssl x509 -in ./vpn-client.pem -text | grep -A2 "Subject Alternative Name"
 ```
 
-### Clear TPM Keys
+### Clear TPM Keys and State
 
 ```bash
-# Clear persistent handles for fresh start (hardware TPM)
-sudo ./bin/tpm-acme-client -clear-handles
+# Clean all containers and volumes (fresh start)
+make clean
 
-# Or pass it with other flags
-sudo ./bin/tpm-acme-client -clear-handles -attest-mode=ak
+# For hardware TPM, manually clear persistent handles if needed:
+sudo tpm2_evictcontrol -C o -c 0x81010002  # Clear AK
+sudo tpm2_evictcontrol -C o -c 0x81010003  # Clear certificate key
 ```
 
 ## Configuration
@@ -429,31 +444,31 @@ sudo ./bin/tpm-acme-client -clear-handles -attest-mode=ak
 
 | Target | Description |
 |--------|-------------|
-| `make build-client` | Build tpm-acme-client binary |
-| `docker compose up --build` | Start complete stack (OpenBao + SWTPM + Server + Client) |
-| `docker compose up openbao init server` | Start server infrastructure only |
-| `make run-client-hw-iak` | Hardware TPM with IAK mode |
-| `make run-client-hw-ak` | Hardware TPM with AK mode |
+| `make build` | Build all containers with layer caching |
+| `make clean` | Clean containers and volumes (fresh start) |
+| `make run-server` | Start server infrastructure (OpenBao + gRPC + SWTPM) |
+| `make run-client-swtpm-iak` | Run client with SWTPM in IAK mode |
+| `make run-client-swtpm-ak` | Run client with SWTPM in AK mode (recommended) |
+| `make run-client-hw-iak` | Run client with hardware TPM in IAK mode |
+| `make run-client-hw-ak` | Run client with hardware TPM in AK mode |
+| `make run-test-swtpm-ak` | Automated end-to-end test with SWTPM |
 
-### Command-Line Flags
+### Architecture Benefits
 
-```bash
-./bin/tpm-acme-client -help
+**Docker Layer Caching** - All containers optimized for fast incremental builds:
+- Dependencies cached separately from source code
+- Proto generation cached separately
+- OpenBao build context reduced from 1GB+ to ~50MB
 
-Flags:
-  -server string
-        Server address (default "localhost:50051")
-  -tpm string
-        TPM device path (default "/dev/tpmrm0")
-  -cn string
-        Certificate common name (default "vpn-client-001.example.com")
-  -attest-mode string
-        Attestation mode: iak or ak (default "ak")
-  -clear-handles
-        Clear TPM persistent handles before running (for automation)
-  -help
-        Show this help message
-```
+**Persistent State** - Data survives container restarts:
+- **SWTPM**: TPM state persisted in `swtpm-state` volume (AK/keys survive restarts)
+- **OpenBao**: PKI configuration and ACME accounts preserved in `openbao-data` volume
+- **Multiple enrollments**: Run clients multiple times without reconfiguration
+
+**Hardware TPM Support** - Device passthrough in Docker:
+- Uses Docker `devices` and `privileged` mode
+- Passes through `/dev/tpm0` and `/dev/tpmrm0`
+- Isolated via Docker Compose profiles
 
 ### Environment Variables
 
@@ -579,32 +594,46 @@ This implementation follows:
 
 **Symptoms**:
 ```
-No hardware TPM detected
-Using simulated attestation mode
+Failed to open TPM device
 ```
 
 **Solutions**:
 1. Check TPM device exists: `ls -l /dev/tpm*`
 2. Load TPM kernel module: `sudo modprobe tpm_tis` or `tpm_crb`
 3. Check TPM is not disabled in BIOS
-4. Run client with sudo: `sudo ./bin/tpm-acme-client`
+4. Ensure Docker has access to devices (privileged mode enabled in compose)
 
 ### Permission Denied on TPM Device
 
 **Error**: `failed to open TPM: permission denied`
 
-**Solution**: Run client with sudo:
+**Solution**: Hardware TPM client runs with privileged mode in Docker. If issues persist:
 ```bash
-sudo ./bin/tpm-acme-client
+# Check device permissions
+ls -l /dev/tpm0 /dev/tpmrm0
+
+# Ensure devices exist
+sudo modprobe tpm_tis
 ```
 
 ### Persistent Handle Already in Use
 
-**Error**: `failed to make certificate key persistent: handle already in use`
+**Symptoms**: AK or certificate key already exists from previous run
 
-**Solution**: Clear old handles before running:
+**Solution**: This is **normal behavior** - the implementation reuses existing keys:
+```
+AK already exists at handle 0x81010002, using existing key
+Certificate key already exists at handle 0x81010003, using existing key
+```
+
+**To force fresh keys**:
 ```bash
-sudo ./bin/tpm-acme-client -clear-handles -attest-mode=ak
+# Clean all state (SWTPM)
+make clean
+
+# Or manually clear hardware TPM handles
+sudo tpm2_evictcontrol -C o -c 0x81010002
+sudo tpm2_evictcontrol -C o -c 0x81010003
 ```
 
 ### Attestation Validation Fails

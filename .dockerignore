@@ -1,0 +1,56 @@
+# OpenBao Build Context - Exclude unnecessary files for Docker layer caching
+# This reduces build context from 1GB+ to ~50MB
+
+# Version control
+.git/
+.gitignore
+.github/
+
+# Device attestation PoC (separate build context)
+deviceattestpoc/
+
+# UI (built separately)
+ui/
+website/
+
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+testdata/
+.test/
+
+# Documentation
+*.md
+!README.md
+docs/
+changelog/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CI/CD
+.circleci/
+.travis.yml
+.gitlab-ci.yml
+
+# Development
+.env
+.env.*
+tmp/
+temp/
+
+# Docker
+.dockerignore
+Dockerfile*
+docker-compose*.yml

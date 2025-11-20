@@ -47,23 +47,28 @@ swtpm_setup --tpm2 --create-config-files skip-if-exist,root
 echo "✓ Configuration created"
 echo ""
 
-# Initialize the TPM with EK certificate
-echo "[3/3] Initializing TPM and generating EK certificate..."
-echo "Using manufacturer CA for EK certificate signing..."
-swtpm_setup --tpm2 \
-    --tpm-state "${TPM_STATE_DIR}" \
-    --overwrite \
-    --create-ek-cert \
-    --create-platform-cert \
-    --write-ek-cert-files "${TPM_STATE_DIR}" \
-    --vmid "swtpm-device-001"
-
-if [ -f "${TPM_STATE_DIR}/ek-rsa2048.crt" ]; then
-    echo "✓ TPM initialized with EK certificate"
+# Initialize the TPM with EK certificate (only if not already initialized)
+if [ -f "${TPM_STATE_DIR}/tpm2-00.permall" ]; then
+    echo "[3/3] TPM state already exists - preserving existing TPM..."
+    echo "✓ TPM state preserved (persistent handles and keys intact)"
     echo ""
 else
-    echo "✗ EK certificate generation failed"
-    exit 1
+    echo "[3/3] Initializing TPM and generating EK certificate..."
+    echo "Using manufacturer CA for EK certificate signing..."
+    swtpm_setup --tpm2 \
+        --tpm-state "${TPM_STATE_DIR}" \
+        --create-ek-cert \
+        --create-platform-cert \
+        --write-ek-cert-files "${TPM_STATE_DIR}" \
+        --vmid "swtpm-device-001"
+
+    if [ -f "${TPM_STATE_DIR}/ek-rsa2048.crt" ]; then
+        echo "✓ TPM initialized with EK certificate"
+        echo ""
+    else
+        echo "✗ EK certificate generation failed"
+        exit 1
+    fi
 fi
 
 # Display EK certificate information

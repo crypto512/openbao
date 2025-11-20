@@ -66,6 +66,63 @@ api_request() {
     echo
 }
 
+# Function to check if PKI is already configured
+check_pki_configured() {
+    echo "=== Checking if PKI is already configured ==="
+
+    # Check if PKI mount exists
+    local mounts=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/sys/mounts")
+    if ! echo "$mounts" | jq -e '.["pki/"]' > /dev/null 2>&1; then
+        echo "PKI mount not found"
+        return 1
+    fi
+    echo "✓ PKI mount exists"
+
+    # Check if root CA exists
+    local root_ca=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki/issuers?list=true" 2>/dev/null)
+    if ! echo "$root_ca" | jq -e '.data.keys | length > 0' > /dev/null 2>&1; then
+        echo "Root CA not found"
+        return 1
+    fi
+    echo "✓ Root CA exists"
+
+    # Check if ipsec-vpn role exists with attestation enabled
+    local role=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki/roles/ipsec-vpn" 2>/dev/null)
+    if ! echo "$role" | jq -e '.data.allow_device_attestation == true' > /dev/null 2>&1; then
+        echo "Role ipsec-vpn not found or attestation not enabled"
+        return 1
+    fi
+    echo "✓ Role ipsec-vpn configured with attestation"
+
+    # Check if ACME is enabled
+    local acme=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki/config/acme" 2>/dev/null)
+    if ! echo "$acme" | jq -e '.data.enabled == true' > /dev/null 2>&1; then
+        echo "ACME not enabled"
+        return 1
+    fi
+    echo "✓ ACME enabled"
+
+    echo "=== PKI is fully configured, skipping initialization ==="
+    return 0
+}
+
+# Check if PKI is already configured (idempotency check)
+if check_pki_configured; then
+    echo ""
+    echo "========================================="
+    echo "✓ PKI already configured - skipping initialization"
+    echo "========================================="
+    echo ""
+    echo "This preserves existing ACME accounts and configuration."
+    echo "To reconfigure from scratch, run: make clean"
+    echo ""
+    exit 0
+fi
+
+echo ""
+echo "PKI not configured or incomplete - performing full initialization"
+echo ""
+
 # Step 1: Enable PKI backend
 echo "=== Step 1: Enable PKI Backend ==="
 # Unmount first if exists

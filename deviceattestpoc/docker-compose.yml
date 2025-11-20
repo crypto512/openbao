@@ -10,6 +10,7 @@ services:
     container_name: swtpm-tpm1
     hostname: tpm1
     volumes:
+      - swtpm-state:/tmp/swtpm-state
       - ./ca/swtpm-manufacturer/RootCA:/app/ca/root:ro
       - ./ca/swtpm-manufacturer/IntermediateCA:/app/ca/intermediate:ro
     networks:
@@ -84,7 +85,7 @@ services:
     networks:
       - attestation-net
 
-  # Client - Requests certificates using TPM attestation
+  # Client - Requests certificates using TPM attestation (SWTPM)
   client:
     build:
       context: .
@@ -109,6 +110,33 @@ services:
     networks:
       - attestation-net
 
+  # Client - Hardware TPM with device passthrough (for real TPM chips)
+  client-hw:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: cert-client-hw
+    hostname: client-hw
+    depends_on:
+      server:
+        condition: service_started
+    environment:
+      - SERVER_ADDR=server:50051
+      - CERT_COMMON_NAME=vpn-client-hw.example.com
+      - LOG_LEVEL=debug
+      - TPM2TOOLS_TCTI=device:/dev/tpmrm0
+    devices:
+      - /dev/tpm0:/dev/tpm0
+      - /dev/tpmrm0:/dev/tpmrm0
+    privileged: true
+    volumes:
+      - client-certs:/certs
+      - ./ca:/ca:ro
+    networks:
+      - attestation-net
+    profiles:
+      - hardware
+
 networks:
   attestation-net:
     driver: bridge
@@ -116,3 +144,4 @@ networks:
 volumes:
   openbao-data:
   client-certs:
+  swtpm-state:
