@@ -15,9 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestValidateEKCertificateChain_ValidChainWithIntermediate tests validation
+// TestValidateAIKCertificateChain_ValidChainWithIntermediate tests validation
 // of a complete certificate chain with an intermediate CA
-func TestValidateEKCertificateChain_ValidChainWithIntermediate(t *testing.T) {
+func TestValidateAIKCertificateChain_ValidChainWithIntermediate(t *testing.T) {
 	// Create a 3-level chain: Root CA -> Intermediate CA -> Leaf (AIK) cert
 
 	// Generate Root CA
@@ -93,13 +93,13 @@ func TestValidateEKCertificateChain_ValidChainWithIntermediate(t *testing.T) {
 
 	// Validate chain
 	trustedRoots := []*x509.Certificate{rootCert}
-	err = validateEKCertificateChain(x5c, trustedRoots)
+	err = validateAIKCertificateChain(x5c, trustedRoots)
 	require.NoError(t, err)
 }
 
-// TestValidateEKCertificateChain_ValidChainDirectToRoot tests validation
+// TestValidateAIKCertificateChain_ValidChainDirectToRoot tests validation
 // when the leaf is signed directly by the root (no intermediate)
-func TestValidateEKCertificateChain_ValidChainDirectToRoot(t *testing.T) {
+func TestValidateAIKCertificateChain_ValidChainDirectToRoot(t *testing.T) {
 	// Generate Root CA
 	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -148,13 +148,13 @@ func TestValidateEKCertificateChain_ValidChainDirectToRoot(t *testing.T) {
 
 	// Validate chain
 	trustedRoots := []*x509.Certificate{rootCert}
-	err = validateEKCertificateChain(x5c, trustedRoots)
+	err = validateAIKCertificateChain(x5c, trustedRoots)
 	require.NoError(t, err)
 }
 
-// TestValidateEKCertificateChain_UntrustedRoot tests validation failure
+// TestValidateAIKCertificateChain_UntrustedRoot tests validation failure
 // when the chain leads to an untrusted root
-func TestValidateEKCertificateChain_UntrustedRoot(t *testing.T) {
+func TestValidateAIKCertificateChain_UntrustedRoot(t *testing.T) {
 	// Generate Root CA (untrusted)
 	untrustedRootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -226,14 +226,14 @@ func TestValidateEKCertificateChain_UntrustedRoot(t *testing.T) {
 
 	// Validate chain should fail
 	trustedRoots := []*x509.Certificate{trustedRootCert}
-	err = validateEKCertificateChain(x5c, trustedRoots)
+	err = validateAIKCertificateChain(x5c, trustedRoots)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to verify AIK certificate chain")
 }
 
-// TestValidateEKCertificateChain_EmptyX5c tests validation failure
+// TestValidateAIKCertificateChain_EmptyX5c tests validation failure
 // when x5c is empty
-func TestValidateEKCertificateChain_EmptyX5c(t *testing.T) {
+func TestValidateAIKCertificateChain_EmptyX5c(t *testing.T) {
 	// Create a trusted root (doesn't matter for this test)
 	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -261,14 +261,14 @@ func TestValidateEKCertificateChain_EmptyX5c(t *testing.T) {
 
 	// Validate should fail
 	trustedRoots := []*x509.Certificate{rootCert}
-	err = validateEKCertificateChain(x5c, trustedRoots)
+	err = validateAIKCertificateChain(x5c, trustedRoots)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no certificates in x5c chain")
 }
 
-// TestValidateEKCertificateChain_NoTrustedRoots tests validation failure
+// TestValidateAIKCertificateChain_NoTrustedRoots tests validation failure
 // when no trusted roots are configured
-func TestValidateEKCertificateChain_NoTrustedRoots(t *testing.T) {
+func TestValidateAIKCertificateChain_NoTrustedRoots(t *testing.T) {
 	// Generate a certificate (doesn't matter what it is)
 	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -292,14 +292,14 @@ func TestValidateEKCertificateChain_NoTrustedRoots(t *testing.T) {
 	trustedRoots := []*x509.Certificate{}
 
 	// Validate should fail
-	err = validateEKCertificateChain(x5c, trustedRoots)
+	err = validateAIKCertificateChain(x5c, trustedRoots)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no trusted roots are configured")
 }
 
-// TestValidateEKCertificateChain_InvalidIntermediateCertificate tests validation failure
+// TestValidateAIKCertificateChain_InvalidIntermediateCertificate tests validation failure
 // when an intermediate certificate in x5c is malformed
-func TestValidateEKCertificateChain_InvalidIntermediateCertificate(t *testing.T) {
+func TestValidateAIKCertificateChain_InvalidIntermediateCertificate(t *testing.T) {
 	// Generate Root CA
 	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -346,7 +346,7 @@ func TestValidateEKCertificateChain_InvalidIntermediateCertificate(t *testing.T)
 
 	// Validate should fail
 	trustedRoots := []*x509.Certificate{rootCert}
-	err = validateEKCertificateChain(x5c, trustedRoots)
+	err = validateAIKCertificateChain(x5c, trustedRoots)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to parse intermediate certificate")
 }

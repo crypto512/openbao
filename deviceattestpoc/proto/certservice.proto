@@ -146,9 +146,10 @@ message ProvisionAIKRequest {
   // TPM permanent identifier (must be already enrolled)
   string permanent_identifier = 1;
 
-  // DER-encoded AK public key (from go-attestation NewAK)
-  // This is the PKIX/SPKI format from x509.MarshalPKIXPublicKey
-  bytes ak_public_key = 2;
+  // PEM-encoded Certificate Signing Request for the AK
+  // The CSR must be created by the client using the AK private key in the TPM
+  // This ensures the issued certificate contains the AK public key from the TPM
+  string ak_csr_pem = 2;
 
   // PEM-encoded EK certificate for validation
   // Must match the enrolled permanent_identifier
@@ -163,11 +164,11 @@ message ProvisionAIKResponse {
   // Error message if status is "error"
   string error = 2;
 
-  // PEM-encoded IAK certificate signed by OpenBao PKI-IAK CA
+  // PEM-encoded AIK certificate signed by OpenBao /pki-ak CA
   // This certificate can be used in TPM attestation (x5c field)
   string iak_certificate_pem = 3;
 
-  // PEM-encoded OpenBao PKI-IAK root CA certificate
+  // PEM-encoded OpenBao /pki-ak root CA certificate
   // For building the certificate chain
   string iak_root_ca_pem = 4;
 

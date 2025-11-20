@@ -8,8 +8,8 @@ import (
 	"fmt"
 )
 
-// validateEKCertificateChain validates the TPM Endorsement Key certificate chain
-// against known manufacturer root CAs
+// validateAIKCertificateChain validates the AIK certificate chain
+// against trusted AK CA root certificates
 //
 // The x5c parameter contains the certificate chain from the attestation statement:
 //   - x5c[0]: AIK certificate (leaf)
@@ -17,11 +17,11 @@ import (
 //   - x5c[n]: Root certificate (optional, usually not included)
 //
 // The chain is validated against trustedRoots to ensure the AIK certificate
-// was issued by a trusted TPM manufacturer.
-func validateEKCertificateChain(x5c [][]byte, trustedRoots []*x509.Certificate) error {
+// was issued by a trusted AK CA.
+func validateAIKCertificateChain(x5c [][]byte, trustedRoots []*x509.Certificate) error {
 	// If no trusted roots are configured, skip validation
 	if len(trustedRoots) == 0 {
-		return fmt.Errorf("EK certificate validation is enabled but no trusted roots are configured")
+		return fmt.Errorf("AIK certificate validation is enabled but no trusted AK CA roots are configured")
 	}
 
 	if len(x5c) == 0 {
@@ -51,7 +51,7 @@ func validateEKCertificateChain(x5c [][]byte, trustedRoots []*x509.Certificate) 
 	}
 
 	// Verify the AIK certificate chain
-	// The AIK certificate should chain to one of the trusted EK root certificates
+	// The AIK certificate should chain to one of the trusted AK CA root certificates
 	// through zero or more intermediate certificates
 	opts := x509.VerifyOptions{
 		Roots:         rootPool,
@@ -96,38 +96,32 @@ func extractTPMManufacturer(cert *x509.Certificate) (string, error) {
 	return "", fmt.Errorf("TPM manufacturer OID not found in certificate")
 }
 
-// TPM EK Root Certificate Management
+// AK CA Root Certificate Management
 //
-// EK root certificates are managed via the config/acme/ek-roots/ API endpoint.
-// Administrators should configure TPM manufacturer root CA certificates using:
+// AK CA root certificates are managed via the config/acme/ak-ca-roots/ API endpoint.
+// Administrators should configure trusted AK CA root certificates using:
 //
-//	bao write pki/config/acme/ek-roots/<manufacturer-name> \
-//	  name=<manufacturer-name> \
+//	bao write pki/config/acme/ak-ca-roots/<ca-name> \
+//	  name=<ca-name> \
 //	  certificate=@<path-to-root-ca.pem>
 //
-// Common TPM manufacturer root CA certificate sources:
+// For the dual PKI architecture:
+// - The /pki-ak mount issues AIK certificates to devices
+// - The /pki-vpn mount validates AIK certificates against AK CA roots
 //
-// Intel TPM EK Root CAs:
-//   - https://trustedservices.intel.com/content/TSC/certs/
-//   - Look for "Intel TPM Root Certificate Authority"
+// Example setup:
 //
-// Infineon TPM EK Root CAs:
-//   - https://www.infineon.com/cms/en/product/security-smart-card-solutions/optiga-embedded-security-solutions/optiga-tpm/
-//   - Download from TPM manufacturer certificate pages
+//	# Export AK CA root certificate from /pki-ak mount
+//	bao read -field=certificate pki-ak/cert/ca > ak-ca-root.pem
 //
-// STMicroelectronics TPM EK Root CAs:
-//   - https://www.st.com/content/st_com/en/products/secure-mcus/trusted-platform-modules.html
-//   - Contact ST for TPM endorsement key certificate chains
-//
-// AMD TPM EK Root CAs:
-//   - Available through AMD Platform Security website
-//
-// Nuvoton TPM EK Root CAs:
-//   - https://www.nuvoton.com/products/cloud-and-data-center-solutions/trusted-platform-module/
+//	# Configure /pki-vpn to trust the AK CA
+//	bao write pki-vpn/config/acme/ak-ca-roots/openbao-ak \
+//	  name=openbao-ak \
+//	  certificate=@ak-ca-root.pem
 //
 // Important Notes:
-// 1. Root certificates should be obtained directly from manufacturer websites
-// 2. Verify certificate fingerprints against published values
-// 3. Update certificates periodically as manufacturers issue new roots
-// 4. Each certificate must be a valid X.509 CA certificate (IsCA=true)
-// 5. Certificates are stored in OpenBao's encrypted storage backend
+// 1. AK CA roots establish trust for AIK certificates
+// 2. Device authorization (allow/blocklist) is handled outside OpenBao
+// 3. Each certificate must be a valid X.509 CA certificate (IsCA=true)
+// 4. Certificates are stored in OpenBao's encrypted storage backend
+// 5. Multiple AK CAs can be configured for different device populations

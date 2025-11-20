@@ -254,17 +254,17 @@ func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*
 }
 
 // ProvisionAIK issues an IAK certificate for a TPM attestation key (AK mode)
-// This endpoint acts as a Privacy CA, issuing IAK certificates for TPMs that lack
+// This endpoint acts as a Privacy CA, issuing AIK certificates for TPMs that lack
 // manufacturer-provisioned IAK certificates.
 func (s *Server) ProvisionAIK(ctx context.Context, req *pb.ProvisionAIKRequest) (*pb.ProvisionAIKResponse, error) {
 	log.Printf("========================================")
 	log.Printf("📋 IAK CERTIFICATE PROVISIONING REQUEST (AK Mode)")
 	log.Printf("========================================")
 	log.Printf("Permanent ID: %s", req.PermanentIdentifier)
-	log.Printf("AK Public Key Size: %d bytes", len(req.AkPublicKey))
+	log.Printf("AK CSR Size: %d bytes", len(req.AkCsrPem))
 	log.Printf("")
 	log.Printf("ℹ️  OpenBao acting as Privacy CA:")
-	log.Printf("   Issuing IAK certificate for TPM without manufacturer-provisioned IAK")
+	log.Printf("   Signing CSR via /pki-ak mount to issue AIK certificate")
 	log.Printf("========================================")
 	log.Printf("")
 
@@ -276,10 +276,10 @@ func (s *Server) ProvisionAIK(ctx context.Context, req *pb.ProvisionAIKRequest) 
 		}, nil
 	}
 
-	if len(req.AkPublicKey) == 0 {
+	if req.AkCsrPem == "" {
 		return &pb.ProvisionAIKResponse{
 			Status: "error",
-			Error:  "ak_public_key is required",
+			Error:  "ak_csr_pem is required",
 		}, nil
 	}
 
@@ -290,24 +290,24 @@ func (s *Server) ProvisionAIK(ctx context.Context, req *pb.ProvisionAIKRequest) 
 		}, nil
 	}
 
-	// Provision IAK certificate via OpenBao
+	// Provision IAK certificate via OpenBao /pki-ak mount
 	iakCertPEM, iakRootCAPEM, notBefore, notAfter, err := s.openbaoClient.ProvisionIAKCertificate(
 		ctx,
 		req.PermanentIdentifier,
-		req.AkPublicKey,
+		req.AkCsrPem,
 		req.EkCertificatePem,
 	)
 	if err != nil {
 		log.Printf("❌ Failed to provision IAK certificate: %v", err)
 		return &pb.ProvisionAIKResponse{
 			Status: "error",
-			Error:  fmt.Sprintf("Failed to provision IAK: %v", err),
+			Error:  fmt.Sprintf("Failed to provision AIK: %v", err),
 		}, nil
 	}
 
-	log.Printf("✓ IAK certificate provisioned successfully!")
+	log.Printf("✓ AIK certificate provisioned successfully via /pki-ak!")
 	log.Printf("  - Permanent ID: %s", req.PermanentIdentifier)
-	log.Printf("  - Issuer: OpenBao PKI-IAK CA")
+	log.Printf("  - Issuer: OpenBao /pki-ak CA")
 	log.Printf("  - Valid from: %s", notBefore)
 	log.Printf("  - Valid until: %s", notAfter)
 	log.Printf("")

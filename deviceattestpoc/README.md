@@ -19,6 +19,14 @@ This PoC demonstrates hardware-backed device attestation where certificate priva
 ## Architecture
 
 ```
+
+
+This PoC implements a **dual PKI architecture**:
+- **`/pki-ak`**: Issues AIK certificates (device identity)
+- **`/pki-vpn`**: Issues VPN certificates via ACME (application certs)
+
+Device authorization is handled by the server module, not OpenBao PKI.
+
 ┌────────────────────────────────────────────────────────────────────┐
 │                         TPM Hardware                               │
 │                                                                    │
@@ -38,6 +46,15 @@ This PoC demonstrates hardware-backed device attestation where certificate priva
 
 ### Component Flow
 
+```
+┌─────────────┐       gRPC         ┌─────────────┐      HTTP/ACME   ┌──────────────┐
+│   Client    │◄──────────────────►│   Server    │◄────────────────►│   OpenBao    │
+│             │  Enrollment        │             │   /pki-ak        │              │
+│ - TPM Init  │  AIK Provisioning  │ - gRPC API  │   /pki-vpn       │ - Dual PKI   │
+│ - CSR (TPM) │  ACME Proxy        │ - Validates │   ACME           │ - /pki-ak    │
+│ - Certify   │  Attestation       │   EK certs  │   Attestation    │ - /pki-vpn   │
+└─────────────┘                    │ - Privacy CA│                  │ - TPM Verify │
+                                   └─────────────┘                  └──────────────┘
 ```
 ┌─────────────┐       gRPC         ┌─────────────┐      ACME       ┌──────────────┐
 │   Client    │◄──────────────────►│   Server    │◄───────────────►│   OpenBao    │
@@ -115,18 +132,22 @@ make run-client-hw-ak     # Default, or --attest-mode=ak
 ```
 
 **Process**:
-1. Create persistent AK at handle 0x81010002 using `CreatePrimary`
-2. Create TPM-protected certificate key at 0x81010003
-3. Send AK public key during enrollment
-4. Receive IAK certificate from OpenBao (365-day validity)
-5. Use TPM2_Certify with AK to prove key attributes
-6. IAK certificate chains to OpenBao PKI root
+1. Enroll TPM device (stores EK root CA in OpenBao)
+2. Create persistent AK at handle 0x81010002 using `CreatePrimary`
+3. Create CSR signed by AK private key using TPM2_Sign
+4. Request AIK certificate from server (validates EK, forwards CSR to /pki-ak)
+5. Receive AIK certificate from OpenBao /pki-ak CA
+6. Create TPM-protected certificate key at 0x81010003
+7. Use TPM2_Certify with AK to prove key attributes for ACME
+8. AIK certificate chains to OpenBao /pki-ak root
 
 **Advantages**:
 - ✅ Works with any TPM that has EK certificate
 - ✅ IAK certificate validity controlled by OpenBao
 - ✅ AK persisted at handle 0x81010002 (survives reboot)
 - ✅ Automatic mode if manufacturer IAK not present
+- ✅ CSR ensures AIK cert contains correct AK public key
+- ✅ Two-phase flow: enrollment, then certificate request
 
 **Requirements**:
 - ❌ Requires EK enrollment with OpenBao first
@@ -185,6 +206,248 @@ docker compose up --build    # Includes swtpm container
 - ⚠️ No hardware security - keys in container memory
 - ⚠️ Not physically bound to device
 - ⚠️ For testing and development only
+
+## Dual PKI Architecture
+
+This PoC implements a **separation of concerns** architecture with two PKI mounts:
+
+### Architecture Components
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    OpenBao (PKI Infrastructure)                   │
+│                                                                   │
+│  /pki-ak (AK CA)              /pki-vpn (VPN CA)                  │
+│  ┌─────────────────────┐      ┌──────────────────────┐          │
+│  │ • AIK certificate   │      │ • ACME server        │          │
+│  │   issuance          │──────│ • device-attest-01   │          │
+│  │ • Role: aik-device  │trusts│ • Validates AIK      │          │
+│  │ • Standard PKI      │      │   certificates       │          │
+│  └─────────────────────┘      └──────────────────────┘          │
+└──────────────────────────────────────────────────────────────────┘
+                    ▲                          ▲
+                    │                          │
+┌───────────────────┼──────────────────────────┼───────────────────┐
+│            Server Module (Application Layer)                      │
+│                   │                          │                    │
+│  ┌────────────────┴───────┐    ┌────────────┴─────────────┐     │
+│  │ ProvisionAIK           │    │ ACME Proxy               │     │
+│  │ • Validates EK cert    │    │ • Forwards ACME requests │     │
+│  │ • Signs AIK CSRs via   │    │ • Adds context           │     │
+│  │   /pki-ak mount        │    └──────────────────────────┘     │
+│  │ • TODO: Enforce        │                                      │
+│  │   allow/blocklist      │                                      │
+│  └────────────────────────┘                                      │
+│                                                                   │
+│  EnrollTPM: Stores EK root CAs in /pki-vpn/config/acme/ak-ca-roots/│
+└───────────────────────────────────────────────────────────────────┘
+```
+
+### Trust Chain
+
+```
+VPN Certificate (end-entity)
+  ↓ issued by
+/pki-vpn CA (OpenBao VPN Root)
+  ↓ trusts (via /config/acme/ak-ca-roots/)
+/pki-ak CA (OpenBao AK Root)
+  ↓ issued
+AIK Certificate
+  ↓ signs (TPM2_Certify)
+Certificate Key (in TPM)
+  ↓ protected by
+TPM Hardware (FixedTPM, SensitiveDataOrigin)
+```
+
+### Two-Phase Certificate Issuance Flow
+
+**Phase 1: AIK Certificate Provisioning**
+
+```
+Client                    Server                     OpenBao
+  │                          │                           │
+  ├─ EnrollTPM ─────────────►│                           │
+  │  (ek_root_ca,            │                           │
+  │   permanent_id)          ├─ POST /config/acme/──────►│
+  │                          │   ak-ca-roots/{name}      │
+  │◄─────────────────────────┤                           │
+  │  ✓ Enrolled              │                           │
+  │                          │                           │
+  ├─ Create AK in TPM        │                           │
+  │  (handle 0x81010002)     │                           │
+  │                          │                           │
+  ├─ Create CSR signed by AK │                           │
+  │                          │                           │
+  ├─ ProvisionAIK ──────────►│                           │
+  │  (csr, ek_cert)          │                           │
+  │                          ├─ Validate EK cert         │
+  │                          ├─ Verify CSR signature     │
+  │                          ├─ TODO: Check allow/block  │
+  │                          │                           │
+  │                          ├─ POST /pki-ak/sign/──────►│
+  │                          │   aik-device              │
+  │                          │   {csr, common_name}      │
+  │                          │                           │
+  │                          │◄──────────────────────────┤
+  │                          │   AIK certificate         │
+  │◄─────────────────────────┤                           │
+  │  AIK certificate         │                           │
+  │                          │                           │
+```
+
+**Phase 2: ACME Certificate Request with TPM Attestation**
+
+```
+Client                    Server                     OpenBao
+  │                          │                           │
+  ├─ Create cert key in TPM  │                           │
+  │  (handle 0x81010003)     │                           │
+  │                          │                           │
+  ├─ RequestCertificate ────►│                           │
+  │                          ├─ POST /acme/new-order ───►│
+  │                          │◄──────────────────────────┤
+  │◄─────────────────────────┤   challenge_url           │
+  │  challenge_token         │                           │
+  │                          │                           │
+  ├─ TPM2_Certify            │                           │
+  │  (prove key attributes)  │                           │
+  │                          │                           │
+  ├─ SubmitAttestation ─────►│                           │
+  │  (attestation_object)    ├─ POST /acme/challenge ───►│
+  │  includes:               │   {attestation_object}    │
+  │  • AIK certificate       │                           │
+  │  • TPM2_Certify output   │   Validates:              │
+  │  • certInfo, pubArea     │   ├─ AIK cert chains to   │
+  │                          │   │   trusted AK CA       │
+  │                          │   ├─ TPM2_Certify sig     │
+  │                          │   ├─ Key attributes       │
+  │                          │   └─ Challenge token      │
+  │                          │◄──────────────────────────┤
+  │◄─────────────────────────┤   ✓ valid                 │
+  │                          │                           │
+  ├─ GetCertificate ────────►├─ POST /acme/cert ────────►│
+  │                          │◄──────────────────────────┤
+  │◄─────────────────────────┤   VPN certificate         │
+  │  VPN certificate         │                           │
+  │                          │                           │
+```
+
+### Key Design Decisions
+
+**Why Dual PKI?**
+- **Separation of Concerns**: Device identity (/pki-ak) vs application certs (/pki-vpn)
+- **Standard PKI**: Both mounts are standard OpenBao PKI with no device-specific logic
+- **Flexible Authorization**: Device policies enforced at application layer (server module)
+- **Scalability**: Easy to add more application PKIs (/pki-ssh, /pki-tls, etc.) that trust /pki-ak
+
+**Why CSR-based AIK Provisioning?**
+- **Correctness**: Ensures AIK certificate contains the correct AK public key from TPM
+- **Security**: CSR signed by AK private key proves possession without key export
+- **Standard**: Uses standard PKI signing workflow (POST /sign/{role})
+
+**Device Authorization Model**
+- **PoC**: Permissive mode - all devices with valid EK certificates can get AIK certs
+- **Production TODO**: Implement server-side allow/blocklist enforcement in `ProvisionAIK()`
+  - Check device permanent_id against database/config before signing CSR
+  - Store enrollment records with metadata (enrolled_at, status, etc.)
+  - Support device revocation (blocklist)
+  - Audit logging for enrollment and certificate issuance
+
+### Storage Paths
+
+```
+OpenBao:
+  /pki-ak/
+    ├─ cert/ca                     # AK CA root certificate
+    ├─ roles/aik-device            # AIK certificate role
+    └─ sign/aik-device             # Sign AIK CSRs
+  
+  /pki-vpn/
+    ├─ cert/ca                     # VPN CA root certificate
+    ├─ roles/ipsec-vpn             # VPN certificate role (ACME)
+    ├─ config/acme/                # ACME configuration
+    ├─ config/acme/ak-ca-roots/    # Trusted AK CA roots
+    │   ├─ openbao-ak              # /pki-ak root (auto-configured)
+    │   └─ swtpm-manufacturer      # SWTPM manufacturer root
+    ├─ config/attestation/         # Attestation settings
+    └─ acme/                       # ACME endpoints
+
+Server Module (PoC):
+  • No persistent storage
+  • TODO: Add database for device enrollment records and allow/blocklist
+```
+
+### Production Deployment Considerations
+
+**TODO: Before Production**
+
+1. **Device Authorization**
+   ```go
+   // In server/openbao_client.go ProvisionIAKCertificate():
+   // TODO: Implement server-side allow/blocklist enforcement
+   if !isDeviceAllowed(permanentID) {
+       return "", "", "", "", fmt.Errorf("device not authorized")
+   }
+   ```
+
+2. **Device Enrollment Database**
+   ```sql
+   CREATE TABLE devices (
+     permanent_id TEXT PRIMARY KEY,
+     ek_cert_pem TEXT,
+     enrolled_at TIMESTAMP,
+     status TEXT,  -- 'allowed', 'blocked', 'revoked'
+     metadata JSONB
+   );
+   ```
+
+3. **AIK Certificate Tracking**
+   ```sql
+   CREATE TABLE aik_certificates (
+     permanent_id TEXT REFERENCES devices(permanent_id),
+     aik_cert_pem TEXT,
+     issued_at TIMESTAMP,
+     expires_at TIMESTAMP,
+     revoked BOOLEAN
+   );
+   ```
+
+4. **Audit Logging**
+   - Log all enrollment attempts (success/failure)
+   - Log all AIK certificate issuance
+   - Log all ACME certificate requests
+   - Track device activity patterns
+
+5. **Certificate Revocation**
+   - Implement CRL or OCSP for /pki-ak
+   - Implement CRL or OCSP for /pki-vpn
+   - Coordinate revocation between both PKIs
+
+6. **High Availability**
+   - Deploy OpenBao with Raft backend
+   - Load balance server module instances
+   - Share device database across server instances
+
+7. **Monitoring**
+   - Monitor certificate issuance rates
+   - Alert on anomalous device behavior
+   - Track failed attestation attempts
+
+### Security Model
+
+**Trust Boundaries**:
+1. **TPM Hardware**: Root of trust, generates non-exportable keys
+2. **EK Certificate**: Manufacturer proves TPM is genuine
+3. **Server Module**: Enforces device enrollment and authorization
+4. **OpenBao /pki-ak**: Issues AIK certificates for enrolled devices
+5. **OpenBao /pki-vpn**: Issues application certificates for attested devices
+
+**Threat Model**:
+- ✅ Protects against: Software key theft, key copying, unauthorized devices
+- ✅ Validates: TPM authenticity (EK), key attributes (TPM2_Certify), device enrollment
+- ⚠️  Assumes: TPM firmware is trustworthy, EK certificate is valid, server module enforces policies
+- ⚠️  PoC Limitation: No device allow/blocklist enforcement (permissive mode)
+
 
 ## Quick Start
 

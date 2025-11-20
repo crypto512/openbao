@@ -263,18 +263,18 @@ func main() {
 		log.Println("ℹ️  AK MODE:")
 		log.Println("   This TPM lacks manufacturer-provisioned IAK certificate.")
 		log.Println("   OpenBao will act as a Privacy CA and issue an IAK certificate")
-		log.Println("   for the newly created Attestation Key (AK).")
+		log.Println("   by signing a CSR created with the AK private key in the TPM.")
 		log.Println("")
 
 		// Get provisioning data from TPM client
-		akPublicDER, ekCertPEM, err := tpmClient.GetIAKProvisioningData()
+		akCSRPEM, ekCertPEM, err := tpmClient.GetIAKProvisioningData()
 		if err != nil {
 			log.Fatalf("Failed to get IAK provisioning data: %v", err)
 		}
 
 		provisionReq := &pb.ProvisionAIKRequest{
 			PermanentIdentifier: permanentID,
-			AkPublicKey:         akPublicDER,
+			AkCsrPem:            akCSRPEM,
 			EkCertificatePem:    ekCertPEM,
 		}
 
@@ -293,8 +293,8 @@ func main() {
 			log.Fatalf("Failed to store IAK certificate: %v", err)
 		}
 
-		log.Printf("✓ IAK certificate provisioned successfully by OpenBao")
-		log.Printf("  Issuer: OpenBao PKI-IAK CA")
+		log.Printf("✓ IAK certificate provisioned successfully by OpenBao /pki-ak")
+		log.Printf("  Issuer: OpenBao AK CA")
 		log.Printf("  Valid from: %s", provisionResp.NotBefore)
 		log.Printf("  Valid until: %s", provisionResp.NotAfter)
 		log.Println("")

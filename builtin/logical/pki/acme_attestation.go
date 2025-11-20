@@ -68,16 +68,12 @@ type AttestationValidator interface {
 type AttestationValidationConfig struct {
 	// RequiredFormats lists the acceptable attestation formats
 	RequiredFormats []AttestationFormat
-	// ValidateEKCertificate enables EK certificate chain validation
+	// ValidateEKCertificate enables AIK certificate chain validation
 	ValidateEKCertificate bool
-	// EKRootCertificates contains trusted manufacturer CA certificates
-	EKRootCertificates []*x509.Certificate
+	// AKCARootCertificates contains trusted AK CA certificates
+	AKCARootCertificates []*x509.Certificate
 	// AllowedPolicyOIDs lists acceptable policy OIDs in certificates
 	AllowedPolicyOIDs []string
-	// AllowedTPMIdentifiers lists the allowed TPM permanent identifiers
-	AllowedTPMIdentifiers []string
-	// BlockedTPMIdentifiers lists the blocked TPM permanent identifiers
-	BlockedTPMIdentifiers []string
 }
 
 // AttestationResult contains the result of attestation validation
@@ -162,10 +158,8 @@ func LoadAttestationValidationConfig(b *backend, s logical.Storage, ctx context.
 	config := &AttestationValidationConfig{
 		RequiredFormats:       make([]AttestationFormat, 0),
 		ValidateEKCertificate: role.ValidateEKCertificate,
-		EKRootCertificates:    make([]*x509.Certificate, 0),
+		AKCARootCertificates:  make([]*x509.Certificate, 0),
 		AllowedPolicyOIDs:     role.AttestationPolicies,
-		AllowedTPMIdentifiers: role.AllowedTPMIdentifiers,
-		BlockedTPMIdentifiers: role.BlockedTPMIdentifiers,
 	}
 
 	// Parse required attestation formats
@@ -173,20 +167,20 @@ func LoadAttestationValidationConfig(b *backend, s logical.Storage, ctx context.
 		config.RequiredFormats = append(config.RequiredFormats, AttestationFormat(formatStr))
 	}
 
-	// Load EK root certificates if validation is enabled
+	// Load AK CA root certificates if validation is enabled
 	if config.ValidateEKCertificate {
-		ekRoots, err := loadEKRootCertificates(ctx, s)
+		akCaRoots, err := loadAKCARootCertificates(ctx, s)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load EK root certificates: %w", err)
+			return nil, fmt.Errorf("failed to load AK CA root certificates: %w", err)
 		}
-		config.EKRootCertificates = ekRoots
+		config.AKCARootCertificates = akCaRoots
 	}
 
 	return config, nil
 }
 
-// loadEKRootCertificates loads trusted EK root CA certificates from storage
-func loadEKRootCertificates(ctx context.Context, s logical.Storage) ([]*x509.Certificate, error) {
-	// Use the loadAllEkRootCertificates function from path_acme_ek_roots.go
-	return loadAllEkRootCertificates(ctx, s)
+// loadAKCARootCertificates loads trusted AK CA root certificates from storage
+func loadAKCARootCertificates(ctx context.Context, s logical.Storage) ([]*x509.Certificate, error) {
+	// Use the loadAllAkCaRootCertificates function from path_acme_ak_ca_roots.go
+	return loadAllAkCaRootCertificates(ctx, s)
 }

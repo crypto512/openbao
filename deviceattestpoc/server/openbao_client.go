@@ -2,21 +2,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -394,7 +392,7 @@ type acmeChallenge struct {
 func (c *OpenBaoClient) getACMEDirectory() (*acmeDirectory, error) {
 	// Use role-specific ACME directory for device attestation
 	// The ipsec-vpn role has allow_device_attestation enabled
-	directoryURL := fmt.Sprintf("%s/v1/pki/roles/ipsec-vpn/acme/directory", c.baseURL)
+	directoryURL := fmt.Sprintf("%s/v1/pki-vpn/roles/ipsec-vpn/acme/directory", c.baseURL)
 
 	resp, err := http.Get(directoryURL)
 	if err != nil {
@@ -567,22 +565,26 @@ func pemToBase64URL(pemData string) (string, error) {
 
 // EnrollTPMDevice enrolls a TPM device by configuring its EK root CA and allowlisting its permanent identifier
 func (c *OpenBaoClient) EnrollTPMDevice(ctx context.Context, permanentID, ekRootCAPEM, ekRootCAName string) error {
-	// Step 1: Configure EK root CA
-	if err := c.configureEKRootCA(ctx, ekRootCAName, ekRootCAPEM); err != nil {
-		return fmt.Errorf("failed to configure EK root CA: %w", err)
+	// Configure AK CA root certificate for AIK validation
+	// Note: In the new architecture, the EK root CA is configured in the AK CA trust store
+	// so that when we issue AIK certificates, we can validate the EK certificate chain
+	if err := c.configureAKCARootCA(ctx, ekRootCAName, ekRootCAPEM); err != nil {
+		return fmt.Errorf("failed to configure AK CA root: %w", err)
 	}
 
-	// Step 2: Update role to enable EK validation and allowlist the TPM
-	if err := c.updateRoleAllowlist(ctx, permanentID); err != nil {
-		return fmt.Errorf("failed to update role allowlist: %w", err)
-	}
+	log.Printf("✓ TPM device enrolled: %s (root CA: %s)", permanentID, ekRootCAName)
+
+	// TODO: Optionally implement allow/blocklist enforcement here in the server module
+	// This would check permanentID against a server-side allow/blocklist before
+	// allowing AIK certificate issuance in ProvisionIAKCertificate()
 
 	return nil
 }
 
-// configureEKRootCA configures the TPM EK root CA certificate in OpenBao
-func (c *OpenBaoClient) configureEKRootCA(ctx context.Context, name, certPEM string) error {
-	url := fmt.Sprintf("%s/v1/pki/config/acme/ek-roots/%s", c.baseURL, name)
+// configureAKCARootCA configures an AK CA root certificate in OpenBao
+// This is used during enrollment to configure manufacturer EK root CAs
+func (c *OpenBaoClient) configureAKCARootCA(ctx context.Context, name, certPEM string) error {
+	url := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots/%s", c.baseURL, name)
 
 	payload := map[string]interface{}{
 		"certificate": certPEM,
@@ -615,104 +617,13 @@ func (c *OpenBaoClient) configureEKRootCA(ctx context.Context, name, certPEM str
 	return nil
 }
 
-// updateRoleAllowlist updates the ipsec-vpn role to enable EK validation and allowlist a TPM
-func (c *OpenBaoClient) updateRoleAllowlist(ctx context.Context, permanentID string) error {
-	url := fmt.Sprintf("%s/v1/pki/roles/ipsec-vpn", c.baseURL)
-
-	// First, read the current role configuration
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create read request: %w", err)
-	}
-	req.Header.Set("X-Vault-Token", c.token)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to read role: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to read role (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var roleResp struct {
-		Data map[string]interface{} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&roleResp); err != nil {
-		return fmt.Errorf("failed to decode role response: %w", err)
-	}
-
-	// Get existing allowlist
-	allowlist := []string{}
-	if existing, ok := roleResp.Data["allowed_tpm_identifiers"]; ok {
-		if existingList, ok := existing.([]interface{}); ok {
-			for _, item := range existingList {
-				if str, ok := item.(string); ok {
-					allowlist = append(allowlist, str)
-				}
-			}
-		}
-	}
-
-	// Add new permanent ID if not already present
-	found := false
-	for _, id := range allowlist {
-		if id == permanentID {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		allowlist = append(allowlist, permanentID)
-	}
-
-	// Update role with EK validation enabled and updated allowlist
-	// Start with existing role data to preserve all settings
-	payload := roleResp.Data
-
-	// Update only the fields we care about
-	payload["validate_ek_certificate"] = true
-	payload["allowed_tpm_identifiers"] = allowlist
-	payload["allow_device_attestation"] = true
-	payload["required_attestation_formats"] = []string{"tpm"}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	req, err = http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payloadBytes)))
-	if err != nil {
-		return fmt.Errorf("failed to create update request: %w", err)
-	}
-
-	req.Header.Set("X-Vault-Token", c.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err = c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to update role: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to update role (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
 // ProvisionIAKCertificate issues an IAK certificate for a TPM attestation key (AK mode)
 // This acts as a Privacy CA, issuing IAK certificates for TPMs without manufacturer-provisioned IAK
+// The client must provide a CSR created with the AK private key in the TPM
 func (c *OpenBaoClient) ProvisionIAKCertificate(
 	ctx context.Context,
 	permanentID string,
-	akPublicKeyDER []byte,
+	akCSRPEM string,
 	ekCertPEM string,
 ) (iakCertPEM, iakRootCAPEM, notBefore, notAfter string, err error) {
 	log.Printf("Provisioning IAK certificate for permanent ID: %s", permanentID)
@@ -737,8 +648,7 @@ func (c *OpenBaoClient) ProvisionIAKCertificate(
 		return "", "", "", "", fmt.Errorf("failed to parse EK certificate: %w", err)
 	}
 
-	// 3. Get all configured EK root CAs and find which one validates this EK cert
-	// We try to verify against all configured root CAs since we don't store per-device mapping
+	// 3. Validate EK certificate against enrolled root CAs
 	_, ekRootCAName, err := c.findMatchingEKRootCA(ctx, ekCert)
 	if err != nil {
 		return "", "", "", "", fmt.Errorf("failed to find matching EK root CA: %w", err)
@@ -746,118 +656,136 @@ func (c *OpenBaoClient) ProvisionIAKCertificate(
 
 	log.Printf("✓ EK certificate validated against enrolled root CA: %s", ekRootCAName)
 
-	// 4. Parse AK public key
-	akPubKey, err := x509.ParsePKIXPublicKey(akPublicKeyDER)
+	// 4. Validate the CSR format
+	csrBlock, _ := pem.Decode([]byte(akCSRPEM))
+	if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" {
+		return "", "", "", "", fmt.Errorf("failed to decode AK CSR PEM")
+	}
+
+	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse AK public key: %w", err)
+		return "", "", "", "", fmt.Errorf("failed to parse AK CSR: %w", err)
 	}
 
-	rsaPubKey, ok := akPubKey.(*rsa.PublicKey)
-	if !ok {
-		return "", "", "", "", fmt.Errorf("AK public key is not RSA (type: %T)", akPubKey)
+	// Verify CSR signature to ensure it was signed with the AK private key
+	if err := csr.CheckSignature(); err != nil {
+		return "", "", "", "", fmt.Errorf("invalid CSR signature: %w", err)
 	}
 
-	log.Printf("✓ AK public key parsed: %d bits", rsaPubKey.N.BitLen())
+	log.Printf("✓ AK CSR validated: subject=%s", csr.Subject.String())
 
-	// 5. Create IAK certificate signed by OpenBao PKI-IAK CA
-	// For PoC simplicity, we'll create a self-signed certificate
-	// In production, this would use a dedicated PKI mount (pki-iak)
-
-	now := time.Now()
-	notBeforeTime := now.Add(-1 * time.Hour)
-	notAfterTime := now.Add(365 * 24 * time.Hour) // 1 year validity
-
-	// Create IAK certificate template
-	iakTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().Unix()),
-		Subject: pkix.Name{
-			CommonName:   "TPM IAK Certificate (OpenBao-issued)",
-			SerialNumber: permanentID,
-			Organization: []string{"OpenBao Privacy CA"},
-		},
-		NotBefore:             notBeforeTime,
-		NotAfter:              notAfterTime,
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-		IsCA:                  false,
+	// 5. Sign the CSR using OpenBao /pki-ak mount
+	signPayload := map[string]interface{}{
+		"csr":         akCSRPEM,
+		"common_name": fmt.Sprintf("TPM AIK - %s", permanentID),
+		"ttl":         "8760h", // 1 year
 	}
 
-	// For PoC, create a simple signing key
-	// In production, this would be the PKI-IAK CA's private key
-	signingKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	signPayloadJSON, err := json.Marshal(signPayload)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to generate signing key: %w", err)
+		return "", "", "", "", fmt.Errorf("failed to marshal sign request: %w", err)
 	}
 
-	// Create root CA certificate (self-signed, represents OpenBao PKI-IAK CA)
-	rootTemplate := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			CommonName:   "OpenBao PKI-IAK Root CA",
-			Organization: []string{"OpenBao Privacy CA"},
-		},
-		NotBefore:             notBeforeTime,
-		NotAfter:              notAfterTime.Add(10 * 365 * 24 * time.Hour), // 10 years
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-	}
-
-	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &signingKey.PublicKey, signingKey)
+	signURL := fmt.Sprintf("%s/v1/pki-ak/sign/aik-device", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", signURL, bytes.NewReader(signPayloadJSON))
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to create root CA: %w", err)
+		return "", "", "", "", fmt.Errorf("failed to create sign request: %w", err)
 	}
 
-	rootCert, err := x509.ParseCertificate(rootDER)
+	req.Header.Set("X-Vault-Token", c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse root CA: %w", err)
+		return "", "", "", "", fmt.Errorf("failed to sign AIK certificate: %w", err)
 	}
+	defer resp.Body.Close()
 
-	// Sign IAK certificate with root CA
-	iakDER, err := x509.CreateCertificate(rand.Reader, iakTemplate, rootCert, rsaPubKey, signingKey)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to create IAK certificate: %w", err)
+		return "", "", "", "", fmt.Errorf("failed to read sign response: %w", err)
 	}
 
-	// Encode certificates to PEM
-	iakCertPEM = string(pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: iakDER,
-	}))
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", "", fmt.Errorf("sign AIK certificate failed (status %d): %s", resp.StatusCode, string(body))
+	}
 
-	iakRootCAPEM = string(pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: rootDER,
-	}))
+	var signResp struct {
+		Data struct {
+			Certificate string   `json:"certificate"`
+			CAChain     []string `json:"ca_chain"`
+		} `json:"data"`
+	}
 
-	notBefore = notBeforeTime.Format(time.RFC3339)
-	notAfter = notAfterTime.Format(time.RFC3339)
+	if err := json.Unmarshal(body, &signResp); err != nil {
+		return "", "", "", "", fmt.Errorf("failed to parse sign response: %w", err)
+	}
 
-	log.Printf("✓ IAK certificate issued successfully")
+	iakCertPEM = signResp.Data.Certificate
+
+	// 6. Get the AK CA root certificate
+	rootCAURL := fmt.Sprintf("%s/v1/pki-ak/cert/ca", c.baseURL)
+	rootReq, err := http.NewRequestWithContext(ctx, "GET", rootCAURL, nil)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("failed to create root CA request: %w", err)
+	}
+
+	rootReq.Header.Set("X-Vault-Token", c.token)
+
+	rootResp, err := c.httpClient.Do(rootReq)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("failed to get AK CA root: %w", err)
+	}
+	defer rootResp.Body.Close()
+
+	rootBody, err := io.ReadAll(rootResp.Body)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("failed to read root CA response: %w", err)
+	}
+
+	if rootResp.StatusCode != http.StatusOK {
+		return "", "", "", "", fmt.Errorf("get AK CA root failed (status %d): %s", rootResp.StatusCode, string(rootBody))
+	}
+
+	iakRootCAPEM = string(rootBody)
+
+	// 7. Parse the issued certificate to get validity period
+	iakBlock, _ := pem.Decode([]byte(iakCertPEM))
+	if iakBlock == nil {
+		return "", "", "", "", fmt.Errorf("failed to decode issued AIK certificate")
+	}
+
+	iakCert, err := x509.ParseCertificate(iakBlock.Bytes)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("failed to parse issued AIK certificate: %w", err)
+	}
+
+	notBefore = iakCert.NotBefore.Format(time.RFC3339)
+	notAfter = iakCert.NotAfter.Format(time.RFC3339)
+
+	log.Printf("✓ AIK certificate issued successfully via /pki-ak")
+	log.Printf("  Serial: %s", iakCert.SerialNumber.String())
+	log.Printf("  Subject: %s", iakCert.Subject.String())
 	log.Printf("  Valid from: %s", notBefore)
 	log.Printf("  Valid until: %s", notAfter)
-
-	// 6. Configure the IAK root CA in OpenBao so it's trusted for attestation validation
-	// Note: OpenBao validates IAK certificates using the same trust store as EK certificates
-	// So we configure the IAK root CA as an EK root CA
-	err = c.configureEKRootCA(ctx, "openbao-pki-iak", iakRootCAPEM)
-	if err != nil {
-		// Log warning but don't fail - the IAK cert is already issued
-		log.Printf("⚠ Warning: Failed to configure IAK root CA in OpenBao: %v", err)
-		log.Printf("  IAK certificate was issued but may not be trusted for attestation validation")
-	} else {
-		log.Printf("✓ IAK root CA configured in OpenBao for attestation validation")
-	}
 
 	return iakCertPEM, iakRootCAPEM, notBefore, notAfter, nil
 }
 
-// isTPMEnrolled checks if a TPM device is enrolled by checking the role's allowlist
+// isTPMEnrolled checks if a TPM device is enrolled
+// Currently returns true for all devices (permissive mode for PoC)
+// TODO: Implement server-side allow/blocklist enforcement here
+//       Store enrolled devices in a local database or configuration
+//       Check against allowlist/blocklist before issuing AIK certificates
 func (c *OpenBaoClient) isTPMEnrolled(ctx context.Context, permanentID string) (bool, error) {
-	// Check if the permanent ID is in the role's allowed_tpm_identifiers list
-	url := fmt.Sprintf("%s/v1/pki/roles/ipsec-vpn", c.baseURL)
+	// For PoC: Accept all devices that have called EnrollTPM
+	// In production: Check against server-side allow/blocklist database
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Verify that the EK root CA is configured (basic enrollment check)
+	// This ensures EnrollTPM was called at least once
+	listURL := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots?list=true", c.baseURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", listURL, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -866,32 +794,32 @@ func (c *OpenBaoClient) isTPMEnrolled(ctx context.Context, permanentID string) (
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("failed to check enrollment: %w", err)
+		return false, fmt.Errorf("failed to check AK CA roots: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, nil
+		return false, fmt.Errorf("no AK CA roots configured - call EnrollTPM first")
 	}
 
-	var roleResp struct {
+	var listResp struct {
 		Data struct {
-			AllowedTPMIdentifiers []interface{} `json:"allowed_tpm_identifiers"`
+			Keys []string `json:"keys"`
 		} `json:"data"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&roleResp); err != nil {
-		return false, fmt.Errorf("failed to decode role response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return false, fmt.Errorf("failed to decode AK CA roots list: %w", err)
 	}
 
-	// Check if permanent ID is in the allowlist
-	for _, item := range roleResp.Data.AllowedTPMIdentifiers {
-		if str, ok := item.(string); ok && str == permanentID {
-			return true, nil
-		}
+	// If at least one AK CA root is configured, consider the system enrolled
+	// TODO: Track individual device enrollments in server-side database
+	if len(listResp.Data.Keys) == 0 {
+		return false, fmt.Errorf("no AK CA roots configured - call EnrollTPM first")
 	}
 
-	return false, nil
+	log.Printf("✓ Device enrollment check passed (permissive mode - %d AK CA roots configured)", len(listResp.Data.Keys))
+	return true, nil
 }
 
 // findMatchingEKRootCA finds the EK root CA that validates the given EK certificate
@@ -972,7 +900,7 @@ func (c *OpenBaoClient) findMatchingEKRootCA(ctx context.Context, ekCert *x509.C
 
 // getEKRootCA retrieves a specific EK root CA by name
 func (c *OpenBaoClient) getEKRootCA(ctx context.Context, name string) (*x509.Certificate, error) {
-	url := fmt.Sprintf("%s/v1/pki/config/acme/ek-roots/%s", c.baseURL, name)
+	url := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots/%s", c.baseURL, name)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {

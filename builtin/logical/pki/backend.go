@@ -227,7 +227,7 @@ func Backend(conf *logical.BackendConfig) *backend {
 	acmePaths = append(acmePaths, pathAcmeAuthorization(&b)...)
 	acmePaths = append(acmePaths, pathAcmeRevoke(&b)...)
 	acmePaths = append(acmePaths, pathAcmeNewEab(&b)...) // auth'd API that lives underneath the various /acme paths
-	acmePaths = append(acmePaths, pathAcmeEkRoots(&b)...)
+	acmePaths = append(acmePaths, pathAcmeAkCaRoots(&b)...)
 
 	b.Paths = append(b.Paths, acmePaths...)
 

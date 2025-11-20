@@ -62,10 +62,10 @@ func (v *TPMAttestationValidator) ValidateAttestation(
 		return nil, fmt.Errorf("%w: failed to parse AIK certificate: %v", ErrBadAttestationStatement, err)
 	}
 
-	// Validate EK certificate chain if required
+	// Validate AIK certificate chain if required
 	if config.ValidateEKCertificate {
-		if err := validateEKCertificateChain(stmt.X5c, config.EKRootCertificates); err != nil {
-			return nil, fmt.Errorf("EK certificate validation failed: %w", err)
+		if err := validateAIKCertificateChain(stmt.X5c, config.AKCARootCertificates); err != nil {
+			return nil, fmt.Errorf("AIK certificate validation failed: %w", err)
 		}
 	}
 
@@ -110,11 +110,6 @@ func (v *TPMAttestationValidator) ValidateAttestation(
 	permanentID, err := ExtractPermanentIdentifierFromCert(aikCert)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract permanent identifier: %w", err)
-	}
-
-	// Validate TPM identifier against blocklist and allowlist
-	if err := validateTPMIdentifier(permanentID, config); err != nil {
-		return nil, err
 	}
 
 	// Build result
@@ -250,28 +245,3 @@ func bytesEqual(a, b []byte) bool {
 	return result == 0
 }
 
-// validateTPMIdentifier validates a TPM permanent identifier against allowlist and blocklist
-func validateTPMIdentifier(permanentID string, config *AttestationValidationConfig) error {
-	// Check blocklist first - blocklist takes precedence
-	for _, blockedID := range config.BlockedTPMIdentifiers {
-		if permanentID == blockedID {
-			return fmt.Errorf("TPM identifier '%s' is blocked", permanentID)
-		}
-	}
-
-	// Check allowlist if configured (non-empty allowlist means enforcement)
-	if len(config.AllowedTPMIdentifiers) > 0 {
-		allowed := false
-		for _, allowedID := range config.AllowedTPMIdentifiers {
-			if permanentID == allowedID {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return fmt.Errorf("TPM identifier '%s' is not in the allowlist", permanentID)
-		}
-	}
-
-	return nil
-}

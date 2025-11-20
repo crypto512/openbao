@@ -457,14 +457,6 @@ serviced by this role.`,
 			Type:        framework.TypeCommaStringSlice,
 			Description: `List of required policy OIDs in attestation certificates.`,
 		},
-		"allowed_tpm_identifiers": {
-			Type:        framework.TypeCommaStringSlice,
-			Description: `List of allowed TPM permanent identifiers for device attestation.`,
-		},
-		"blocked_tpm_identifiers": {
-			Type:        framework.TypeCommaStringSlice,
-			Description: `List of blocked TPM permanent identifiers for device attestation.`,
-		},
 	}
 
 	return &framework.Path{
@@ -947,23 +939,6 @@ must be configured. Disabling this weakens the security of device attestation.`,
 certificates. Policies are specified as OID strings (e.g., "1.2.3.4"). The attestation
 certificate must contain all specified policy OIDs. Comma-separated list.`,
 			},
-			"allowed_tpm_identifiers": {
-				Type:    framework.TypeCommaStringSlice,
-				Default: []string{},
-				Description: `List of allowed TPM permanent identifiers for device attestation.
-When non-empty, only TPM devices with permanent identifiers in this list will be allowed
-to obtain certificates. The permanent identifier is extracted from the AIK certificate's
-Subject DN or SAN extension. If empty, all TPMs are allowed (unless blocked).
-Comma-separated list.`,
-			},
-			"blocked_tpm_identifiers": {
-				Type:    framework.TypeCommaStringSlice,
-				Default: []string{},
-				Description: `List of blocked TPM permanent identifiers for device attestation.
-TPM devices with permanent identifiers in this list will be denied certificates regardless
-of other settings. The blocklist is checked before the allowlist. The permanent identifier
-is extracted from the AIK certificate's Subject DN or SAN extension. Comma-separated list.`,
-			},
 		},
 
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -1265,8 +1240,6 @@ func (b *backend) pathRoleCreate(ctx context.Context, req *logical.Request, data
 		RequiredAttestationFormats:   data.Get("required_attestation_formats").([]string),
 		ValidateEKCertificate:        data.Get("validate_ek_certificate").(bool),
 		AttestationPolicies:          data.Get("attestation_policies").([]string),
-		AllowedTPMIdentifiers:        data.Get("allowed_tpm_identifiers").([]string),
-		BlockedTPMIdentifiers:        data.Get("blocked_tpm_identifiers").([]string),
 		Name:                          name,
 	}
 
@@ -1525,8 +1498,6 @@ func (b *backend) pathRolePatch(ctx context.Context, req *logical.Request, data 
 		RequiredAttestationFormats:   data.GetWithExplicitDefault("required_attestation_formats", oldEntry.RequiredAttestationFormats).([]string),
 		ValidateEKCertificate:        data.GetWithExplicitDefault("validate_ek_certificate", oldEntry.ValidateEKCertificate).(bool),
 		AttestationPolicies:          data.GetWithExplicitDefault("attestation_policies", oldEntry.AttestationPolicies).([]string),
-		AllowedTPMIdentifiers:        data.GetWithExplicitDefault("allowed_tpm_identifiers", oldEntry.AllowedTPMIdentifiers).([]string),
-		BlockedTPMIdentifiers:        data.GetWithExplicitDefault("blocked_tpm_identifiers", oldEntry.BlockedTPMIdentifiers).([]string),
 	}
 
 	allowedOtherSANsData, wasSet := data.GetOk("allowed_other_sans")
@@ -1779,8 +1750,6 @@ type roleEntry struct {
 	RequiredAttestationFormats   []string `json:"required_attestation_formats"`
 	ValidateEKCertificate        bool     `json:"validate_ek_certificate"`
 	AttestationPolicies          []string `json:"attestation_policies"`
-	AllowedTPMIdentifiers        []string `json:"allowed_tpm_identifiers"`
-	BlockedTPMIdentifiers        []string `json:"blocked_tpm_identifiers"`
 	// Name is only set when the role has been stored, on the fly roles have a blank name
 	Name string `json:"-"`
 }
@@ -1847,8 +1816,6 @@ func (r *roleEntry) ToResponseData() map[string]interface{} {
 		"required_attestation_formats":       r.RequiredAttestationFormats,
 		"validate_ek_certificate":            r.ValidateEKCertificate,
 		"attestation_policies":               r.AttestationPolicies,
-		"allowed_tpm_identifiers":            r.AllowedTPMIdentifiers,
-		"blocked_tpm_identifiers":            r.BlockedTPMIdentifiers,
 	}
 	if r.MaxPathLength != nil {
 		responseData["max_path_length"] = r.MaxPathLength

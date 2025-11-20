@@ -343,29 +343,29 @@ func (c *TPMClient) readTPMNVRAM(rwc *os.File, nvIndex tpmutil.Handle) ([]byte, 
 	return data, nil
 }
 
-// GetIAKProvisioningData returns the data needed to request IAK certificate from OpenBao
+// GetIAKProvisioningData returns a CSR signed by the AK private key for IAK certificate provisioning
 // This is used in AK mode when manufacturer IAK is not available
-func (c *TPMClient) GetIAKProvisioningData() (akPublicDER []byte, ekCertPEM string, err error) {
+func (c *TPMClient) GetIAKProvisioningData() (akCSRPEM string, ekCertPEM string, err error) {
 	if c.iakHandle == 0 {
-		return nil, "", fmt.Errorf("persistent AK not created - cannot get provisioning data")
+		return "", "", fmt.Errorf("persistent AK not created - cannot get provisioning data")
 	}
 
-	// Open TPM to read AK public key
+	// Open TPM to read AK public key and sign CSR
 	rwc, err := c.openTPMDevice()
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to open TPM device: %w", err)
+		return "", "", fmt.Errorf("failed to open TPM device: %w", err)
 	}
 	defer rwc.Close()
 
 	// Read AK public key from persistent handle
 	akPub, _, _, err := tpm2.ReadPublic(rwc, c.iakHandle)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to read AK public: %w", err)
+		return "", "", fmt.Errorf("failed to read AK public: %w", err)
 	}
 
 	// Extract RSA public key
 	if akPub.Type != tpm2.AlgRSA {
-		return nil, "", fmt.Errorf("unsupported AK type: %v (expected RSA)", akPub.Type)
+		return "", "", fmt.Errorf("unsupported AK type: %v (expected RSA)", akPub.Type)
 	}
 
 	// Create standard RSA public key
@@ -374,15 +374,34 @@ func (c *TPMClient) GetIAKProvisioningData() (akPublicDER []byte, ekCertPEM stri
 		E: int(akPub.RSAParameters.Exponent()),
 	}
 
-	log.Printf("Preparing IAK provisioning data:")
+	log.Printf("Creating CSR for IAK certificate:")
 	log.Printf("  AK Public Key: bits=%d", akRSAPub.N.BitLen())
-	log.Printf("  AK Modulus (first 32 bytes): %x", akRSAPub.N.Bytes()[:32])
 
-	// Marshal AK public key to DER format (PKIX/SPKI)
-	akPublicDER, err = x509.MarshalPKIXPublicKey(akRSAPub)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to marshal AK public key: %w", err)
+	// Create CSR template
+	csrTemplate := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName:   fmt.Sprintf("TPM AIK - %s", c.permanentID),
+			SerialNumber: c.permanentID,
+			Organization: []string{"TPM Device"},
+		},
+		SignatureAlgorithm: x509.SHA256WithRSA,
 	}
+
+	// Create the CSR data to be signed (DER-encoded TBSCertificateRequest)
+	csrDER, err := x509.CreateCertificateRequest(nil, csrTemplate, &tpmSigner{
+		tpmHandle: c.iakHandle,
+		pubKey:    akRSAPub,
+		rwc:       rwc,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create CSR: %w", err)
+	}
+
+	// Encode CSR to PEM
+	akCSRPEM = string(pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE REQUEST",
+		Bytes: csrDER,
+	}))
 
 	// Encode EK certificate to PEM
 	ekCertPEMBytes := pem.EncodeToMemory(&pem.Block{
@@ -390,7 +409,44 @@ func (c *TPMClient) GetIAKProvisioningData() (akPublicDER []byte, ekCertPEM stri
 		Bytes: c.ekCert.Raw,
 	})
 
-	return akPublicDER, string(ekCertPEMBytes), nil
+	log.Printf("✓ CSR created and signed by TPM AK")
+	return akCSRPEM, string(ekCertPEMBytes), nil
+}
+
+// tpmSigner implements crypto.Signer interface for TPM-based signing
+type tpmSigner struct {
+	tpmHandle tpmutil.Handle
+	pubKey    *rsa.PublicKey
+	rwc       io.ReadWriteCloser
+}
+
+func (s *tpmSigner) Public() crypto.PublicKey {
+	return s.pubKey
+}
+
+func (s *tpmSigner) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) (signature []byte, err error) {
+	// TPM2_Sign expects SHA256 hash
+	if opts.HashFunc() != crypto.SHA256 {
+		return nil, fmt.Errorf("only SHA256 is supported for TPM signing")
+	}
+
+	// Sign with TPM using the AK handle
+	scheme := &tpm2.SigScheme{
+		Alg:  tpm2.AlgRSASSA,
+		Hash: tpm2.AlgSHA256,
+	}
+
+	sig, err := tpm2.Sign(s.rwc.(io.ReadWriter), s.tpmHandle, "", digest, nil, scheme)
+	if err != nil {
+		return nil, fmt.Errorf("TPM sign failed: %w", err)
+	}
+
+	// Extract signature bytes
+	if sig.RSA == nil {
+		return nil, fmt.Errorf("expected RSA signature, got nil")
+	}
+
+	return sig.RSA.Signature, nil
 }
 
 // SetIAKCertificate stores the OpenBao-issued IAK certificate
