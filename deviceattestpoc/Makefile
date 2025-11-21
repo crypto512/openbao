@@ -20,16 +20,18 @@ help:
 	@echo "All builds use Docker layer caching for fast incremental builds."
 	@echo ""
 
-# Build all containers with layer caching
+# Build all containers with layer caching using dedicated builder
 build:
 	@echo "Building all containers with layer caching..."
+	@docker buildx create --name deviceattestpoc-builder --use 2>/dev/null || docker buildx use deviceattestpoc-builder
 	@docker compose build
 	@echo "✓ Build complete"
 
-# Clean containers and volumes
+# Clean containers, volumes, and images
 clean:
-	@echo "Cleaning containers and volumes..."
-	@docker compose down -v 2>/dev/null || true
+	@echo "Cleaning containers, volumes, and images..."
+	@docker compose down -v --rmi all --remove-orphans 2>/dev/null || true
+	@docker buildx rm deviceattestpoc-builder 2>/dev/null || true
 	@echo "✓ Cleaned"
 
 # Run server infrastructure
