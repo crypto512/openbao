@@ -247,3 +247,157 @@ func writeTPM2B(w *bytes.Buffer, data []byte) {
 	binary.Write(w, binary.BigEndian, uint16(len(data)))
 	w.Write(data)
 }
+
+func TestParseTPMT_SIGNATURE_RSASSA(t *testing.T) {
+	buf := new(bytes.Buffer)
+
+	// Algorithm ID (RSASSA)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSASSA))
+
+	// Hash algorithm (SHA256)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256))
+
+	// Signature data (TPM2B)
+	testSig := make([]byte, 256) // 2048-bit RSA signature
+	for i := range testSig {
+		testSig[i] = byte(i)
+	}
+	writeTPM2B(buf, testSig)
+
+	// Parse
+	sigBytes, algID, hashAlg, err := ParseTPMT_SIGNATURE(buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, uint16(TPM_ALG_RSASSA), algID)
+	require.Equal(t, uint16(TPM_ALG_SHA256), hashAlg)
+	require.Equal(t, testSig, sigBytes)
+}
+
+func TestParseTPMT_SIGNATURE_RSAPSS(t *testing.T) {
+	buf := new(bytes.Buffer)
+
+	// Algorithm ID (RSAPSS)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSAPSS))
+
+	// Hash algorithm (SHA384)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA384))
+
+	// Signature data (TPM2B)
+	testSig := make([]byte, 256) // 2048-bit RSA signature
+	for i := range testSig {
+		testSig[i] = byte(i)
+	}
+	writeTPM2B(buf, testSig)
+
+	// Parse
+	sigBytes, algID, hashAlg, err := ParseTPMT_SIGNATURE(buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, uint16(TPM_ALG_RSAPSS), algID)
+	require.Equal(t, uint16(TPM_ALG_SHA384), hashAlg)
+	require.Equal(t, testSig, sigBytes)
+}
+
+func TestParseTPMT_SIGNATURE_ECDSA(t *testing.T) {
+	buf := new(bytes.Buffer)
+
+	// Algorithm ID (ECDSA)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_ECDSA))
+
+	// Hash algorithm (SHA256)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256))
+
+	// Signature R (TPM2B)
+	testR := make([]byte, 32) // 256-bit ECDSA R value
+	for i := range testR {
+		testR[i] = byte(i)
+	}
+	writeTPM2B(buf, testR)
+
+	// Signature S (TPM2B)
+	testS := make([]byte, 32) // 256-bit ECDSA S value
+	for i := range testS {
+		testS[i] = byte(i + 32)
+	}
+	writeTPM2B(buf, testS)
+
+	// Parse
+	sigBytes, algID, hashAlg, err := ParseTPMT_SIGNATURE(buf.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, uint16(TPM_ALG_ECDSA), algID)
+	require.Equal(t, uint16(TPM_ALG_SHA256), hashAlg)
+
+	// ECDSA signature should be r || s concatenated
+	expectedSig := append(testR, testS...)
+	require.Equal(t, expectedSig, sigBytes)
+}
+
+func TestParseTPMT_SIGNATURE_NULLAlgorithm(t *testing.T) {
+	buf := new(bytes.Buffer)
+
+	// Algorithm ID (NULL)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_NULL))
+
+	// Parse should fail
+	_, _, _, err := ParseTPMT_SIGNATURE(buf.Bytes())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NULL algorithm")
+}
+
+func TestParseTPMT_SIGNATURE_UnsupportedAlgorithm(t *testing.T) {
+	buf := new(bytes.Buffer)
+
+	// Algorithm ID (unsupported)
+	binary.Write(buf, binary.BigEndian, uint16(0x9999))
+
+	// Parse should fail
+	_, _, _, err := ParseTPMT_SIGNATURE(buf.Bytes())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported signature algorithm")
+}
+
+func TestParseTPMT_SIGNATURE_TooShort(t *testing.T) {
+	// Empty data
+	_, _, _, err := ParseTPMT_SIGNATURE([]byte{})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "too short")
+
+	// Only 1 byte
+	_, _, _, err = ParseTPMT_SIGNATURE([]byte{0x00})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "too short")
+}
+
+func TestParseTPMT_SIGNATURE_TruncatedRSA(t *testing.T) {
+	buf := new(bytes.Buffer)
+
+	// Algorithm ID (RSASSA)
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSASSA))
+	// No hash alg or signature data
+
+	_, _, _, err := ParseTPMT_SIGNATURE(buf.Bytes())
+	require.Error(t, err)
+}
+
+func TestTPMHashAlgToGo(t *testing.T) {
+	tests := []struct {
+		tpmAlg    uint16
+		expected  int
+		supported bool
+	}{
+		{TPM_ALG_SHA1, 3, true},   // crypto.SHA1 = 3
+		{TPM_ALG_SHA256, 5, true}, // crypto.SHA256 = 5
+		{TPM_ALG_SHA384, 6, true}, // crypto.SHA384 = 6
+		{TPM_ALG_SHA512, 7, true}, // crypto.SHA512 = 7
+		{0x9999, 0, false},        // Unsupported
+		{TPM_ALG_NULL, 0, false},  // NULL algorithm
+	}
+
+	for _, tc := range tests {
+		t.Run(string(rune(tc.tpmAlg)), func(t *testing.T) {
+			hashAlg, supported := TPMHashAlgToGo(tc.tpmAlg)
+			require.Equal(t, tc.supported, supported)
+			if tc.supported {
+				require.Equal(t, tc.expected, hashAlg)
+			}
+		})
+	}
+}

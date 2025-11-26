@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
+	"strings"
 )
 
 // OIDs for permanent identifier and hardware module name
@@ -196,8 +197,18 @@ func encodeHardwareModuleNameExtension(hwType asn1.ObjectIdentifier, hwSerial []
 	}, nil
 }
 
-// ParsePermanentIdentifierFromCert extracts the permanent identifier from a certificate
-// This searches both Subject DN serialNumber and SAN extension
+// URNPermanentIdentifierPrefix is the URI prefix for permanent identifiers in SAN URIs
+// This format aligns with RFC 4043 concepts but uses URI SAN instead of otherName
+const URNPermanentIdentifierPrefix = "urn:permanent-identifier:"
+
+// ParsePermanentIdentifierFromCert extracts the permanent identifier from a certificate.
+// This searches in the following order:
+//  1. Subject DN serialNumber field
+//  2. SAN otherName with permanentIdentifier OID (1.3.6.1.5.5.7.8.3) per RFC 4043
+//  3. SAN URI with "urn:permanent-identifier:" prefix
+//
+// The URI SAN approach is particularly useful for device attestation where the
+// permanent identifier needs to be easily extractable and match a pre-registered value.
 func ParsePermanentIdentifierFromCert(cert *x509.Certificate) (string, error) {
 	// First try Subject DN serialNumber
 	if cert.Subject.SerialNumber != "" {
@@ -213,6 +224,17 @@ func ParsePermanentIdentifierFromCert(cert *x509.Certificate) (string, error) {
 			permanentID, err := parsePermanentIdentifierFromSAN(ext.Value)
 			if err == nil && permanentID != "" {
 				return permanentID, nil
+			}
+		}
+	}
+
+	// Check URI SANs for permanent-identifier URN format
+	// This format is used by device attestation LAK certificates
+	for _, uri := range cert.URIs {
+		if uri != nil {
+			uriStr := uri.String()
+			if strings.HasPrefix(uriStr, URNPermanentIdentifierPrefix) {
+				return strings.TrimPrefix(uriStr, URNPermanentIdentifierPrefix), nil
 			}
 		}
 	}

@@ -146,8 +146,11 @@ func TestVerifyTPMSignature_RSA(t *testing.T) {
 
 	// Sign with RS256
 	hash := sha256.Sum256(certInfo)
-	signature, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hash[:])
+	rawSignature, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hash[:])
 	require.NoError(t, err)
+
+	// Wrap in TPMT_SIGNATURE structure
+	signature := createTestTPMTSignature(rawSignature, TPM_ALG_RSASSA, TPM_ALG_SHA256)
 
 	// Verify
 	err = verifyTPMSignature(aikCert, certInfo, signature, -257) // RS256
@@ -165,42 +168,26 @@ func TestVerifyTPMSignature_InvalidSignature(t *testing.T) {
 	// Data to sign
 	certInfo := []byte("test-cert-info-data")
 
-	// Invalid signature
-	invalidSignature := make([]byte, 256)
-	rand.Read(invalidSignature)
+	// Invalid signature (random bytes wrapped in TPMT_SIGNATURE)
+	invalidRawSig := make([]byte, 256)
+	rand.Read(invalidRawSig)
+	invalidSignature := createTestTPMTSignature(invalidRawSig, TPM_ALG_RSASSA, TPM_ALG_SHA256)
 
 	// Verify should fail
 	err = verifyTPMSignature(aikCert, certInfo, invalidSignature, -257) // RS256
 	require.Error(t, err)
 }
 
-func TestCoseAlgToHashAlg(t *testing.T) {
-	tests := []struct {
-		alg      int64
-		expected crypto.Hash
-		wantErr  bool
-	}{
-		{-257, crypto.SHA256, false}, // RS256
-		{-258, crypto.SHA384, false}, // RS384
-		{-259, crypto.SHA512, false}, // RS512
-		{-7, crypto.SHA256, false},   // ES256
-		{-35, crypto.SHA384, false},  // ES384
-		{-36, crypto.SHA512, false},  // ES512
-		{999, 0, true},               // Unsupported
-	}
-
-	for _, tt := range tests {
-		t.Run("", func(t *testing.T) {
-			hash, err := coseAlgToHashAlg(tt.alg)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tt.expected, hash)
-			}
-		})
-	}
+// createTestTPMTSignature creates a TPMT_SIGNATURE structure for testing
+func createTestTPMTSignature(rawSig []byte, sigAlg, hashAlg uint16) []byte {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, sigAlg)
+	binary.Write(buf, binary.BigEndian, hashAlg)
+	binary.Write(buf, binary.BigEndian, uint16(len(rawSig)))
+	buf.Write(rawSig)
+	return buf.Bytes()
 }
+
 
 func TestBytesEqual(t *testing.T) {
 	tests := []struct {

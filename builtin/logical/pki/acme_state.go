@@ -202,6 +202,10 @@ type acmeOrder struct {
 	PermanentIdentifier  string `json:"permanent-identifier,omitempty"`
 	HardwareModuleName   string `json:"hardware-module-name,omitempty"`
 	AttestationFormat    string `json:"attestation-format,omitempty"`
+	// AttestedPublicKeyDER contains the base64url-encoded DER of the public key
+	// from the TPM pubArea. Per draft-acme-device-attest-07 Section 5, the server
+	// MUST verify that the CSR contains this public key before issuing the certificate.
+	AttestedPublicKeyDER string `json:"attested-public-key-der,omitempty"`
 }
 
 func (o acmeOrder) getIdentifierDNSValues() []string {

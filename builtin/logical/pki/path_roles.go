@@ -457,6 +457,11 @@ serviced by this role.`,
 			Type:        framework.TypeCommaStringSlice,
 			Description: `List of required policy OIDs in attestation certificates.`,
 		},
+		"allow_unsigned_csr": {
+			Type:        framework.TypeBool,
+			Default:     false,
+			Description: `Allow signing CSRs without validating the CSR signature. USE WITH CAUTION: Only enable for TPM attestation workflows where the public key is verified through other means (e.g., Privacy CA challenge-response). When enabled, the CSR structure is still validated but its signature is not verified.`,
+		},
 	}
 
 	return &framework.Path{
@@ -939,6 +944,14 @@ must be configured. Disabling this weakens the security of device attestation.`,
 certificates. Policies are specified as OID strings (e.g., "1.2.3.4"). The attestation
 certificate must contain all specified policy OIDs. Comma-separated list.`,
 			},
+			"allow_unsigned_csr": {
+				Type:    framework.TypeBool,
+				Default: false,
+				Description: `Allow signing CSRs without validating the CSR signature.
+USE WITH CAUTION: Only enable for TPM attestation workflows where the public key is
+verified through other means (e.g., Privacy CA challenge-response). When enabled,
+the CSR structure is still validated but its signature is not verified.`,
+			},
 		},
 
 		Operations: map[logical.Operation]framework.OperationHandler{
@@ -1240,6 +1253,7 @@ func (b *backend) pathRoleCreate(ctx context.Context, req *logical.Request, data
 		RequiredAttestationFormats:   data.Get("required_attestation_formats").([]string),
 		ValidateEKCertificate:        data.Get("validate_ek_certificate").(bool),
 		AttestationPolicies:          data.Get("attestation_policies").([]string),
+		AllowUnsignedCSR:             data.Get("allow_unsigned_csr").(bool),
 		Name:                          name,
 	}
 
@@ -1498,6 +1512,7 @@ func (b *backend) pathRolePatch(ctx context.Context, req *logical.Request, data 
 		RequiredAttestationFormats:   data.GetWithExplicitDefault("required_attestation_formats", oldEntry.RequiredAttestationFormats).([]string),
 		ValidateEKCertificate:        data.GetWithExplicitDefault("validate_ek_certificate", oldEntry.ValidateEKCertificate).(bool),
 		AttestationPolicies:          data.GetWithExplicitDefault("attestation_policies", oldEntry.AttestationPolicies).([]string),
+		AllowUnsignedCSR:             data.GetWithExplicitDefault("allow_unsigned_csr", oldEntry.AllowUnsignedCSR).(bool),
 	}
 
 	allowedOtherSANsData, wasSet := data.GetOk("allowed_other_sans")
@@ -1750,6 +1765,8 @@ type roleEntry struct {
 	RequiredAttestationFormats   []string `json:"required_attestation_formats"`
 	ValidateEKCertificate        bool     `json:"validate_ek_certificate"`
 	AttestationPolicies          []string `json:"attestation_policies"`
+	// Allow signing CSRs without validating the CSR signature (for TPM attestation workflows)
+	AllowUnsignedCSR bool `json:"allow_unsigned_csr"`
 	// Name is only set when the role has been stored, on the fly roles have a blank name
 	Name string `json:"-"`
 }
@@ -1816,6 +1833,7 @@ func (r *roleEntry) ToResponseData() map[string]interface{} {
 		"required_attestation_formats":       r.RequiredAttestationFormats,
 		"validate_ek_certificate":            r.ValidateEKCertificate,
 		"attestation_policies":               r.AttestationPolicies,
+		"allow_unsigned_csr":                 r.AllowUnsignedCSR,
 	}
 	if r.MaxPathLength != nil {
 		responseData["max_path_length"] = r.MaxPathLength

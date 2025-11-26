@@ -5,6 +5,9 @@ package pki
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/binary"
@@ -32,7 +35,18 @@ const (
 	TPM_ALG_SHA256 = 0x000B // SHA-256 hash algorithm
 	TPM_ALG_NULL   = 0x0010 // NULL algorithm (indicates no algorithm)
 	TPM_ALG_RSASSA = 0x0014 // RSASSA signature scheme
+	TPM_ALG_RSAPSS = 0x0016 // RSAPSS signature scheme
 	TPM_ALG_ECDSA  = 0x0018 // ECDSA signature scheme
+
+	// Additional hash algorithm constants for signature parsing
+	TPM_ALG_SHA1   = 0x0004 // SHA-1 hash algorithm
+	TPM_ALG_SHA384 = 0x000C // SHA-384 hash algorithm
+	TPM_ALG_SHA512 = 0x000D // SHA-512 hash algorithm
+
+	// TPM ECC curve identifiers (TPM 2.0 Part 2, Section 6.4)
+	TPM_ECC_NIST_P256 = 0x0003 // NIST P-256 (secp256r1)
+	TPM_ECC_NIST_P384 = 0x0004 // NIST P-384 (secp384r1)
+	TPM_ECC_NIST_P521 = 0x0005 // NIST P-521 (secp521r1)
 )
 
 // TPMS_ATTEST represents the TPM attestation structure as defined in
@@ -504,6 +518,66 @@ func (pub *TPMT_PUBLIC) ToRSAPublicKey() (*rsa.PublicKey, error) {
 	}, nil
 }
 
+// ToPublicKey converts a TPMT_PUBLIC structure to Go's crypto.PublicKey interface.
+// This handles both RSA and ECC keys.
+//
+// Returns an error if:
+//   - The key type is not supported (only TPM_ALG_RSA and TPM_ALG_ECDSA)
+//   - Required parameters or key material are missing
+//   - For ECC keys, the curve is not supported
+func (pub *TPMT_PUBLIC) ToPublicKey() (crypto.PublicKey, error) {
+	switch pub.Type {
+	case TPM_ALG_RSA:
+		return pub.ToRSAPublicKey()
+	case TPM_ALG_ECDSA:
+		return pub.ToECDSAPublicKey()
+	default:
+		return nil, fmt.Errorf("unsupported key type: 0x%x", pub.Type)
+	}
+}
+
+// ToECDSAPublicKey converts a TPMT_PUBLIC structure to Go's standard *ecdsa.PublicKey.
+// This is useful for cryptographic operations using the Go crypto library.
+//
+// Returns an error if:
+//   - The key type is not TPM_ALG_ECDSA
+//   - Required ECC parameters or point coordinates are missing
+//   - The curve is not supported
+func (pub *TPMT_PUBLIC) ToECDSAPublicKey() (*ecdsa.PublicKey, error) {
+	if pub.Type != TPM_ALG_ECDSA {
+		return nil, fmt.Errorf("not an ECDSA key")
+	}
+	if pub.Parameters.ECCDetail == nil {
+		return nil, fmt.Errorf("missing ECC parameters")
+	}
+	if pub.Unique.ECC == nil {
+		return nil, fmt.Errorf("missing ECC point")
+	}
+
+	// Map TPM curve ID to Go elliptic curve
+	var curve elliptic.Curve
+	switch pub.Parameters.ECCDetail.CurveID {
+	case TPM_ECC_NIST_P256:
+		curve = elliptic.P256()
+	case TPM_ECC_NIST_P384:
+		curve = elliptic.P384()
+	case TPM_ECC_NIST_P521:
+		curve = elliptic.P521()
+	default:
+		return nil, fmt.Errorf("unsupported ECC curve: 0x%x", pub.Parameters.ECCDetail.CurveID)
+	}
+
+	// Parse X and Y coordinates
+	x := new(big.Int).SetBytes(pub.Unique.ECC.X)
+	y := new(big.Int).SetBytes(pub.Unique.ECC.Y)
+
+	return &ecdsa.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
+	}, nil
+}
+
 // ComputeName computes the TPM Name of a public key object.
 //
 // The TPM Name is a cryptographic binding between an object and its properties,
@@ -534,4 +608,104 @@ func (pub *TPMT_PUBLIC) ComputeName(pubAreaBytes []byte) ([]byte, error) {
 	copy(name[2:], digest)
 
 	return name, nil
+}
+
+// ParseTPMT_SIGNATURE parses a TPMT_SIGNATURE structure and returns the raw signature
+// bytes along with algorithm information.
+//
+// TPMT_SIGNATURE format (TPM 2.0 Part 2, Section 11.3.4):
+//   - sigAlg (2 bytes, big-endian) - TPMI_ALG_SIG_SCHEME
+//   - signature (union based on sigAlg):
+//   - For RSASSA/RSAPSS: TPMS_SIGNATURE_RSA (hashAlg + TPM2B_PUBLIC_KEY_RSA)
+//   - For ECDSA: TPMS_SIGNATURE_ECC (hashAlg + TPM2B for r + TPM2B for s)
+//
+// The returned sigBytes are suitable for use with Go's crypto verification functions:
+//   - For RSA: raw signature bytes
+//   - For ECDSA: r || s concatenated (each padded to curve size)
+//
+// Returns:
+//   - sigBytes: the raw signature suitable for Go crypto verification
+//   - algID: the signature algorithm (TPM_ALG_RSASSA, TPM_ALG_RSAPSS, TPM_ALG_ECDSA)
+//   - hashAlg: the hash algorithm used (TPM_ALG_SHA256, etc.)
+//   - err: error if parsing fails
+func ParseTPMT_SIGNATURE(data []byte) (sigBytes []byte, algID uint16, hashAlg uint16, err error) {
+	if len(data) < 2 {
+		return nil, 0, 0, fmt.Errorf("TPMT_SIGNATURE too short: need at least 2 bytes for algorithm ID")
+	}
+
+	buf := bytes.NewReader(data)
+
+	// Read signature algorithm (2 bytes)
+	if err := binary.Read(buf, binary.BigEndian, &algID); err != nil {
+		return nil, 0, 0, fmt.Errorf("failed to read sigAlg: %w", err)
+	}
+
+	switch algID {
+	case TPM_ALG_RSASSA, TPM_ALG_RSAPSS:
+		// TPMS_SIGNATURE_RSA format:
+		//   - hash (2 bytes) - TPMI_ALG_HASH
+		//   - sig (TPM2B_PUBLIC_KEY_RSA) - size prefix + signature bytes
+		if err := binary.Read(buf, binary.BigEndian, &hashAlg); err != nil {
+			return nil, 0, 0, fmt.Errorf("failed to read RSA hash algorithm: %w", err)
+		}
+
+		sigBytes, err = readTPM2B(buf)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("failed to read RSA signature: %w", err)
+		}
+		return sigBytes, algID, hashAlg, nil
+
+	case TPM_ALG_ECDSA:
+		// TPMS_SIGNATURE_ECC format:
+		//   - hash (2 bytes) - TPMI_ALG_HASH
+		//   - signatureR (TPM2B_ECC_PARAMETER) - size prefix + r bytes
+		//   - signatureS (TPM2B_ECC_PARAMETER) - size prefix + s bytes
+		if err := binary.Read(buf, binary.BigEndian, &hashAlg); err != nil {
+			return nil, 0, 0, fmt.Errorf("failed to read ECDSA hash algorithm: %w", err)
+		}
+
+		r, err := readTPM2B(buf)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("failed to read ECDSA r: %w", err)
+		}
+		s, err := readTPM2B(buf)
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("failed to read ECDSA s: %w", err)
+		}
+
+		// Concatenate r || s for Go's crypto/ecdsa verification
+		// Note: Go's ecdsa.Verify expects r and s as big.Int, but for
+		// compatibility with other verification paths, we return r||s
+		sigBytes = append(r, s...)
+		return sigBytes, algID, hashAlg, nil
+
+	case TPM_ALG_NULL:
+		return nil, algID, 0, fmt.Errorf("TPMT_SIGNATURE has NULL algorithm (no signature)")
+
+	default:
+		return nil, 0, 0, fmt.Errorf("unsupported signature algorithm: 0x%04x", algID)
+	}
+}
+
+// TPMHashAlgToGo converts a TPM hash algorithm identifier to a Go crypto.Hash.
+// Returns the crypto.Hash value and whether the algorithm is supported.
+//
+// Supported algorithms:
+//   - TPM_ALG_SHA1 (0x0004) -> crypto.SHA1
+//   - TPM_ALG_SHA256 (0x000B) -> crypto.SHA256
+//   - TPM_ALG_SHA384 (0x000C) -> crypto.SHA384
+//   - TPM_ALG_SHA512 (0x000D) -> crypto.SHA512
+func TPMHashAlgToGo(tpmAlg uint16) (hashAlg int, supported bool) {
+	switch tpmAlg {
+	case TPM_ALG_SHA1:
+		return 3, true // crypto.SHA1 = 3
+	case TPM_ALG_SHA256:
+		return 5, true // crypto.SHA256 = 5
+	case TPM_ALG_SHA384:
+		return 6, true // crypto.SHA384 = 6
+	case TPM_ALG_SHA512:
+		return 7, true // crypto.SHA512 = 7
+	default:
+		return 0, false
+	}
 }

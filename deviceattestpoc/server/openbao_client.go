@@ -1,38 +1,36 @@
-
 package main
 
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
-	"time"
-
-	pb "github.com/openbao/openbao/deviceattestpoc/proto"
 )
 
-// OpenBaoClient handles interactions with OpenBao ACME API
 type OpenBaoClient struct {
-	baseURL    string
-	token      string
-	httpClient *http.Client
-	accountKey *ecdsa.PrivateKey
-	accountURL string
-	kidURL     string
+	baseURL        string
+	token          string
+	httpClient     *http.Client
+	accountManager *ACMEAccountManager
 }
 
-// ACMEOrder represents the ACME order information
 type ACMEOrder struct {
 	OrderID           string
 	AuthorizationURL  string
@@ -43,145 +41,130 @@ type ACMEOrder struct {
 	CertificateURL    string
 }
 
-// NewOpenBaoClient creates a new OpenBao client
 func NewOpenBaoClient(baseURL, token string) (*OpenBaoClient, error) {
-	// Generate ACME account key
-	accountKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	accountManager, err := NewACMEAccountManager("/data/acme-accounts")
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate account key: %w", err)
+		return nil, fmt.Errorf("failed to create account manager: %w", err)
 	}
 
 	client := &OpenBaoClient{
-		baseURL:    strings.TrimSuffix(baseURL, "/"),
-		token:      token,
-		httpClient: &http.Client{},
-		accountKey: accountKey,
+		baseURL:        strings.TrimSuffix(baseURL, "/"),
+		token:          token,
+		httpClient:     &http.Client{},
+		accountManager: accountManager,
 	}
 
-	// Create ACME account with retries
-	fmt.Printf("Creating ACME account...\n")
-	var lastErr error
-	for i := 0; i < 10; i++ {
-		if err := client.createACMEAccount(); err != nil {
-			lastErr = err
-			if i < 9 {
-				fmt.Printf("Failed to create ACME account (attempt %d/10): %v. Retrying in 2s...\n", i+1, err)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-		} else {
-			fmt.Printf("✓ ACME account created successfully (kid: %s)\n", client.kidURL)
-			return client, nil
+	log.Printf("OpenBao client initialized with account persistence")
+	return client, nil
+}
+
+// ensureACMEAccount ensures an ACME account exists for the given PKI path
+func (c *OpenBaoClient) ensureACMEAccount(pkiPath string) (*ACMEAccount, error) {
+	account, err := c.accountManager.GetOrCreateAccount(pkiPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// If account URL is not set, register with OpenBao
+	if account.AccountURL == "" {
+		directory, err := c.getACMEDirectoryForPath(pkiPath)
+		if err != nil {
+			return nil, err
 		}
+
+		payload := map[string]interface{}{
+			"termsOfServiceAgreed": true,
+			"contact":              []string{},
+		}
+		payloadBytes, _ := json.Marshal(payload)
+
+		jws, err := c.buildJWSWithAccount(directory.NewAccount, "", payloadBytes, true, account)
+		if err != nil {
+			return nil, err
+		}
+
+		resp, err := http.Post(directory.NewAccount, "application/jose+json", strings.NewReader(jws))
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("account creation failed: %s", string(body))
+		}
+
+		accountURL := resp.Header.Get("Location")
+		if err := c.accountManager.SetAccountURL(pkiPath, accountURL); err != nil {
+			log.Printf("Warning: failed to persist account URL: %v", err)
+		}
+		account.AccountURL = accountURL
+		log.Printf("ACME account registered for %s: %s", pkiPath, accountURL)
 	}
 
-	return nil, fmt.Errorf("failed to create ACME account after 10 attempts: %w", lastErr)
+	return account, nil
 }
 
-// createACMEAccount creates an ACME account on OpenBao
-func (c *OpenBaoClient) createACMEAccount() error {
-	// Get directory
-	directory, err := c.getACMEDirectory()
+func (c *OpenBaoClient) CreateACMEOrder(ctx context.Context, req *CertRequest) (*ACMEOrder, error) {
+	// Get PKI configuration for this usage
+	usageConfig, err := GetUsageConfig(req.Usage)
 	if err != nil {
-		return fmt.Errorf("failed to get ACME directory: %w", err)
+		return nil, err
+	}
+	pkiPath := usageConfig.GetACMEPath()
+
+	// Ensure we have an account for this PKI
+	account, err := c.ensureACMEAccount(pkiPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure ACME account: %w", err)
 	}
 
-	// Create account
+	directory, err := c.getACMEDirectoryForPath(pkiPath)
+	if err != nil {
+		return nil, err
+	}
+
 	payload := map[string]interface{}{
-		"termsOfServiceAgreed": true,
-		"contact":              []string{},
-	}
-
-	payloadBytes, _ := json.Marshal(payload)
-
-	// Build JWS with jwk header
-	jws, err := c.buildJWS(directory.NewAccount, "", payloadBytes, true)
-	if err != nil {
-		return fmt.Errorf("failed to build JWS: %w", err)
-	}
-
-	resp, err := http.Post(directory.NewAccount, "application/jose+json", strings.NewReader(jws))
-	if err != nil {
-		return fmt.Errorf("failed to create account: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("account creation failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Save account URL (kid)
-	c.accountURL = resp.Header.Get("Location")
-	c.kidURL = c.accountURL
-
-	return nil
-}
-
-// CreateACMEOrder creates a new ACME order with device attestation
-func (c *OpenBaoClient) CreateACMEOrder(ctx context.Context, req *pb.CertRequest) (*ACMEOrder, error) {
-	directory, err := c.getACMEDirectory()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get ACME directory: %w", err)
-	}
-
-	// Build order request with permanent-identifier ONLY
-	// Per draft-acme-device-attest-07, when using device attestation with permanent-identifier,
-	// DNS names are included in the CSR's SAN field, NOT as separate ACME identifiers
-	// This avoids requiring DNS-01 or HTTP-01 challenges
-	identifiers := []map[string]string{
-		{
-			"type":  "permanent-identifier",
-			"value": req.PermanentIdentifier,
+		"identifiers": []map[string]string{
+			{"type": "permanent-identifier", "value": req.PermanentIdentifier},
 		},
 	}
-
-	// Note: DNS names from req.SanDns will be in the CSR's SubjectAltName extension
-	// They are NOT added as ACME identifiers to avoid additional challenge requirements
-
-	payload := map[string]interface{}{
-		"identifiers": identifiers,
-	}
-
 	payloadBytes, _ := json.Marshal(payload)
 
-	jws, err := c.buildJWS(directory.NewOrder, c.kidURL, payloadBytes, false)
+	jws, err := c.buildJWSWithAccount(directory.NewOrder, account.AccountURL, payloadBytes, false, account)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build JWS: %w", err)
+		return nil, err
 	}
 
 	resp, err := http.Post(directory.NewOrder, "application/jose+json", strings.NewReader(jws))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create order: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("order creation failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("order creation failed: %s", string(body))
 	}
 
 	orderURL := resp.Header.Get("Location")
 
 	var orderResp map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&orderResp); err != nil {
-		return nil, fmt.Errorf("failed to decode order response: %w", err)
+		return nil, err
 	}
 
-	// Get authorization URL
 	authorizations := orderResp["authorizations"].([]interface{})
 	if len(authorizations) == 0 {
 		return nil, fmt.Errorf("no authorizations in order")
 	}
 	authzURL := authorizations[0].(string)
 
-	// Get authorization to find device-attest-01 challenge
-	authz, err := c.getAuthorization(authzURL)
+	authz, err := c.getAuthorizationWithAccount(authzURL, account)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get authorization: %w", err)
+		return nil, err
 	}
 
-	// Find device-attest-01 challenge
 	var challengeURL, challengeToken string
 	for _, ch := range authz.Challenges {
 		if ch.Type == "device-attest-01" {
@@ -195,55 +178,71 @@ func (c *OpenBaoClient) CreateACMEOrder(ctx context.Context, req *pb.CertRequest
 		return nil, fmt.Errorf("no device-attest-01 challenge found")
 	}
 
-	// Compute account thumbprint
-	thumbprint, err := c.getAccountThumbprint()
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute thumbprint: %w", err)
-	}
-
 	return &ACMEOrder{
 		OrderID:           orderURL,
 		AuthorizationURL:  authzURL,
 		ChallengeURL:      challengeURL,
 		ChallengeToken:    challengeToken,
-		AccountThumbprint: thumbprint,
+		AccountThumbprint: account.Thumbprint,
 		FinalizeURL:       orderResp["finalize"].(string),
 	}, nil
 }
 
-// SubmitAttestation submits the attestation object to the challenge
+// extractPKIPathFromURL extracts the PKI path from an ACME URL
+// e.g., http://openbao:8200/v1/pki-vpn/roles/ipsec-vpn/acme/order/xxx -> pki-vpn/roles/ipsec-vpn
+func extractPKIPathFromURL(acmeURL string) string {
+	// Find /v1/ and then extract until /acme/
+	idx := strings.Index(acmeURL, "/v1/")
+	if idx == -1 {
+		return "pki-vpn/roles/ipsec-vpn" // default fallback
+	}
+	rest := acmeURL[idx+4:] // after /v1/
+	acmeIdx := strings.Index(rest, "/acme/")
+	if acmeIdx == -1 {
+		return "pki-vpn/roles/ipsec-vpn" // default fallback
+	}
+	return rest[:acmeIdx]
+}
+
 func (c *OpenBaoClient) SubmitAttestation(ctx context.Context, challengeURL, attestationObject string) error {
-	payload := map[string]interface{}{
-		"attObj": attestationObject,
+	pkiPath := extractPKIPathFromURL(challengeURL)
+	account, err := c.accountManager.GetOrCreateAccount(pkiPath)
+	if err != nil {
+		return fmt.Errorf("failed to get account: %w", err)
 	}
 
+	payload := map[string]interface{}{"attObj": attestationObject}
 	payloadBytes, _ := json.Marshal(payload)
 
-	jws, err := c.buildJWS(challengeURL, c.kidURL, payloadBytes, false)
+	jws, err := c.buildJWSWithAccount(challengeURL, account.AccountURL, payloadBytes, false, account)
 	if err != nil {
-		return fmt.Errorf("failed to build JWS: %w", err)
+		return err
 	}
 
 	resp, err := http.Post(challengeURL, "application/jose+json", strings.NewReader(jws))
 	if err != nil {
-		return fmt.Errorf("failed to submit attestation: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("attestation submission failed with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("attestation submission failed: %s", string(body))
 	}
 
 	return nil
 }
 
-// GetOrderStatus gets the current status of an order
 func (c *OpenBaoClient) GetOrderStatus(ctx context.Context, orderURL string) (string, error) {
-	// ACME uses POST-as-GET: POST request with empty payload
-	jws, err := c.buildJWS(orderURL, c.kidURL, []byte(""), false)
+	pkiPath := extractPKIPathFromURL(orderURL)
+	account, err := c.accountManager.GetOrCreateAccount(pkiPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to build JWS for order fetch: %w", err)
+		return "", fmt.Errorf("failed to get account: %w", err)
+	}
+
+	jws, err := c.buildJWSWithAccount(orderURL, account.AccountURL, []byte(""), false, account)
+	if err != nil {
+		return "", err
 	}
 
 	resp, err := http.Post(orderURL, "application/jose+json", strings.NewReader(jws))
@@ -252,122 +251,181 @@ func (c *OpenBaoClient) GetOrderStatus(ctx context.Context, orderURL string) (st
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
 	var orderResp map[string]interface{}
-	if err := json.Unmarshal(bodyBytes, &orderResp); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&orderResp); err != nil {
 		return "", err
 	}
 
-	status, ok := orderResp["status"].(string)
-	if !ok {
-		return "", fmt.Errorf("order status not found or not a string in response")
-	}
-
-	return status, nil
+	return orderResp["status"].(string), nil
 }
 
-// FinalizeOrder finalizes an ACME order with a CSR
 func (c *OpenBaoClient) FinalizeOrder(ctx context.Context, finalizeURL, csrPEM string) error {
-	// Build finalize payload with CSR
-	// The CSR needs to be in base64url format without PEM headers
+	pkiPath := extractPKIPathFromURL(finalizeURL)
+	account, err := c.accountManager.GetOrCreateAccount(pkiPath)
+	if err != nil {
+		return fmt.Errorf("failed to get account: %w", err)
+	}
+
 	csrDER, err := pemToBase64URL(csrPEM)
 	if err != nil {
-		return fmt.Errorf("failed to convert CSR: %w", err)
+		return err
 	}
 
-	payload := map[string]interface{}{
-		"csr": csrDER,
-	}
-
+	payload := map[string]interface{}{"csr": csrDER}
 	payloadBytes, _ := json.Marshal(payload)
 
-	jws, err := c.buildJWS(finalizeURL, c.kidURL, payloadBytes, false)
+	jws, err := c.buildJWSWithAccount(finalizeURL, account.AccountURL, payloadBytes, false, account)
 	if err != nil {
-		return fmt.Errorf("failed to build JWS for finalize: %w", err)
+		return err
 	}
 
 	resp, err := http.Post(finalizeURL, "application/jose+json", strings.NewReader(jws))
 	if err != nil {
-		return fmt.Errorf("failed to finalize order: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("finalize failed with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("finalize failed: %s", string(body))
 	}
 
-	fmt.Printf("✓ Order finalized successfully\n")
 	return nil
 }
 
-// GetCertificate retrieves the certificate from a ready order
 func (c *OpenBaoClient) GetCertificate(ctx context.Context, orderURL string) (string, []string, error) {
-	// First, get the order to find the certificate URL
-	jws, err := c.buildJWS(orderURL, c.kidURL, []byte(""), false)
+	pkiPath := extractPKIPathFromURL(orderURL)
+	account, err := c.accountManager.GetOrCreateAccount(pkiPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to build JWS for order fetch: %w", err)
+		return "", nil, fmt.Errorf("failed to get account: %w", err)
+	}
+
+	jws, err := c.buildJWSWithAccount(orderURL, account.AccountURL, []byte(""), false, account)
+	if err != nil {
+		return "", nil, err
 	}
 
 	resp, err := http.Post(orderURL, "application/jose+json", strings.NewReader(jws))
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to fetch order: %w", err)
+		return "", nil, err
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", nil, err
-	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
 
 	var orderResp map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &orderResp); err != nil {
 		return "", nil, err
 	}
 
-	status, _ := orderResp["status"].(string)
-	if status != "valid" {
-		return "", nil, fmt.Errorf("order status is %s, expected valid", status)
+	if orderResp["status"].(string) != "valid" {
+		return "", nil, fmt.Errorf("order status is %s", orderResp["status"])
 	}
 
-	certificateURL, ok := orderResp["certificate"].(string)
-	if !ok {
-		return "", nil, fmt.Errorf("certificate URL not found in order")
-	}
+	certificateURL := orderResp["certificate"].(string)
 
-	// Download the certificate
-	jws, err = c.buildJWS(certificateURL, c.kidURL, []byte(""), false)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to build JWS for certificate download: %w", err)
-	}
-
-	resp, err = http.Post(certificateURL, "application/jose+json", strings.NewReader(jws))
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to download certificate: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", nil, fmt.Errorf("certificate download failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	certPEM, err := io.ReadAll(resp.Body)
+	jws, err = c.buildJWSWithAccount(certificateURL, account.AccountURL, []byte(""), false, account)
 	if err != nil {
 		return "", nil, err
 	}
 
-	// The certificate is returned as a PEM chain
-	// Split into certificate and chain
-	// For simplicity, return the whole thing as certificate, empty chain
+	resp, err = http.Post(certificateURL, "application/jose+json", strings.NewReader(jws))
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+
+	certPEM, _ := io.ReadAll(resp.Body)
 	return string(certPEM), []string{}, nil
 }
 
-// Helper types and methods
+func (c *OpenBaoClient) SignLAKCertificate(
+	ctx context.Context,
+	ekHashBase64 string,
+	csrPEM string,
+) (lakCertPEM, lakRootCAPEM string, err error) {
+	log.Printf("Issuing LAK certificate for EK hash: %s", ekHashBase64)
+
+	if csrPEM == "" {
+		return "", "", fmt.Errorf("CSR is required")
+	}
+
+	// sign-verbatim uses SANs from CSR when UseCSRSANs=true
+	// The CSR already contains the SAN URI, so we don't need to pass it here
+	signPayload := map[string]interface{}{
+		"csr":                csrPEM,
+		"ttl":                "8760h",
+		"key_usage":          []string{"DigitalSignature"},
+		"ext_key_usage_oids": []string{"2.23.133.8.3"},
+	}
+
+	signPayloadJSON, _ := json.Marshal(signPayload)
+
+	signURL := fmt.Sprintf("%s/v1/pki-ak/sign-verbatim/lak-device", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", signURL, bytes.NewReader(signPayloadJSON))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("X-Vault-Token", c.token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("sign LAK certificate failed: %s", string(body))
+	}
+
+	var signResp struct {
+		Data struct {
+			Certificate string `json:"certificate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &signResp); err != nil {
+		return "", "", err
+	}
+
+	lakCertPEM = signResp.Data.Certificate
+
+	rootCAURL := fmt.Sprintf("%s/v1/pki-ak/cert/ca", c.baseURL)
+	rootReq, _ := http.NewRequestWithContext(ctx, "GET", rootCAURL, nil)
+	rootReq.Header.Set("X-Vault-Token", c.token)
+
+	rootResp, err := c.httpClient.Do(rootReq)
+	if err != nil {
+		return "", "", err
+	}
+	defer rootResp.Body.Close()
+
+	rootBody, _ := io.ReadAll(rootResp.Body)
+
+	// Parse JSON response to extract certificate
+	var rootCAResp struct {
+		Data struct {
+			Certificate string `json:"certificate"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rootBody, &rootCAResp); err != nil {
+		return "", "", fmt.Errorf("failed to parse AK CA response: %w", err)
+	}
+	lakRootCAPEM = rootCAResp.Data.Certificate
+
+	log.Printf("LAK certificate issued for EK: %s", ekHashBase64)
+	return lakCertPEM, lakRootCAPEM, nil
+}
+
+type CertRequest struct {
+	CommonName          string
+	SanIPs              []string
+	SanDNS              []string
+	PermanentIdentifier string
+	Usage               string
+}
 
 type acmeDirectory struct {
 	NewNonce   string `json:"newNonce"`
@@ -377,9 +435,9 @@ type acmeDirectory struct {
 }
 
 type acmeAuthorization struct {
-	Identifier map[string]string   `json:"identifier"`
-	Status     string              `json:"status"`
-	Challenges []acmeChallenge     `json:"challenges"`
+	Identifier map[string]string `json:"identifier"`
+	Status     string            `json:"status"`
+	Challenges []acmeChallenge   `json:"challenges"`
 }
 
 type acmeChallenge struct {
@@ -390,10 +448,11 @@ type acmeChallenge struct {
 }
 
 func (c *OpenBaoClient) getACMEDirectory() (*acmeDirectory, error) {
-	// Use role-specific ACME directory for device attestation
-	// The ipsec-vpn role has allow_device_attestation enabled
-	directoryURL := fmt.Sprintf("%s/v1/pki-vpn/roles/ipsec-vpn/acme/directory", c.baseURL)
+	return c.getACMEDirectoryForPath("pki-vpn/roles/ipsec-vpn")
+}
 
+func (c *OpenBaoClient) getACMEDirectoryForPath(pkiPath string) (*acmeDirectory, error) {
+	directoryURL := fmt.Sprintf("%s/v1/%s/acme/directory", c.baseURL, pkiPath)
 	resp, err := http.Get(directoryURL)
 	if err != nil {
 		return nil, err
@@ -404,16 +463,22 @@ func (c *OpenBaoClient) getACMEDirectory() (*acmeDirectory, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&directory); err != nil {
 		return nil, err
 	}
-
 	return &directory, nil
 }
 
 func (c *OpenBaoClient) getAuthorization(authzURL string) (*acmeAuthorization, error) {
-	// ACME uses POST-as-GET: POST request with empty payload
-	// Build JWS with empty payload
-	jws, err := c.buildJWS(authzURL, c.kidURL, []byte(""), false)
+	// Legacy method - get default account for backward compatibility
+	account, err := c.accountManager.GetOrCreateAccount("pki-vpn/roles/ipsec-vpn")
 	if err != nil {
-		return nil, fmt.Errorf("failed to build JWS for authorization fetch: %w", err)
+		return nil, err
+	}
+	return c.getAuthorizationWithAccount(authzURL, account)
+}
+
+func (c *OpenBaoClient) getAuthorizationWithAccount(authzURL string, account *ACMEAccount) (*acmeAuthorization, error) {
+	jws, err := c.buildJWSWithAccount(authzURL, account.AccountURL, []byte(""), false, account)
+	if err != nil {
+		return nil, err
 	}
 
 	resp, err := http.Post(authzURL, "application/jose+json", strings.NewReader(jws))
@@ -422,43 +487,28 @@ func (c *OpenBaoClient) getAuthorization(authzURL string) (*acmeAuthorization, e
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
 	var authz acmeAuthorization
-	if err := json.Unmarshal(bodyBytes, &authz); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&authz); err != nil {
 		return nil, err
 	}
-
 	return &authz, nil
 }
 
-func (c *OpenBaoClient) getAccountThumbprint() (string, error) {
-	// Compute JWK thumbprint per RFC 7638
-	pubKey := c.accountKey.Public().(*ecdsa.PublicKey)
-
-	jwk := map[string]string{
-		"crv": "P-256",
-		"kty": "EC",
-		"x":   base64.RawURLEncoding.EncodeToString(pubKey.X.Bytes()),
-		"y":   base64.RawURLEncoding.EncodeToString(pubKey.Y.Bytes()),
+func (c *OpenBaoClient) buildJWS(url, kid string, payload []byte, includeJWK bool) (string, error) {
+	// Legacy method - get default account for backward compatibility
+	account, err := c.accountManager.GetOrCreateAccount("pki-vpn/roles/ipsec-vpn")
+	if err != nil {
+		return "", err
 	}
-
-	jwkBytes, _ := json.Marshal(jwk)
-	hash := sha256.Sum256(jwkBytes)
-	return base64.RawURLEncoding.EncodeToString(hash[:]), nil
+	return c.buildJWSWithAccount(url, kid, payload, includeJWK, account)
 }
 
-func (c *OpenBaoClient) buildJWS(url, kid string, payload []byte, includeJWK bool) (string, error) {
-	// Get nonce
+func (c *OpenBaoClient) buildJWSWithAccount(url, kid string, payload []byte, includeJWK bool, account *ACMEAccount) (string, error) {
 	nonce, err := c.getNonce()
 	if err != nil {
 		return "", err
 	}
 
-	// Build protected header
 	protected := map[string]interface{}{
 		"alg":   "ES256",
 		"nonce": nonce,
@@ -466,15 +516,11 @@ func (c *OpenBaoClient) buildJWS(url, kid string, payload []byte, includeJWK boo
 	}
 
 	if includeJWK {
-		pubKey := c.accountKey.Public().(*ecdsa.PublicKey)
-
-		// EC P-256 coordinates must be exactly 32 bytes
-		// pubKey.X.Bytes() and pubKey.Y.Bytes() omit leading zeros, so we need to pad them
+		pubKey := account.PrivateKey.Public().(*ecdsa.PublicKey)
 		xBytes := make([]byte, 32)
 		yBytes := make([]byte, 32)
 		pubKey.X.FillBytes(xBytes)
 		pubKey.Y.FillBytes(yBytes)
-
 		protected["jwk"] = map[string]string{
 			"crv": "P-256",
 			"kty": "EC",
@@ -489,33 +535,24 @@ func (c *OpenBaoClient) buildJWS(url, kid string, payload []byte, includeJWK boo
 	protectedB64 := base64.RawURLEncoding.EncodeToString(protectedBytes)
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payload)
 
-	// Sign
 	signInput := protectedB64 + "." + payloadB64
 	hash := sha256.Sum256([]byte(signInput))
 
-	r, s, err := ecdsa.Sign(rand.Reader, c.accountKey, hash[:])
+	r, s, err := ecdsa.Sign(rand.Reader, account.PrivateKey, hash[:])
 	if err != nil {
 		return "", err
 	}
 
-	// Encode signature - ES256 requires exactly 64 bytes (32 for r, 32 for s)
 	signature := make([]byte, 64)
-	rBytes := r.Bytes()
-	sBytes := s.Bytes()
-
-	// Pad r and s to 32 bytes each
-	copy(signature[32-len(rBytes):32], rBytes)
-	copy(signature[64-len(sBytes):64], sBytes)
-
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
 	signatureB64 := base64.RawURLEncoding.EncodeToString(signature)
 
-	// Build JWS
 	jws := map[string]string{
 		"protected": protectedB64,
 		"payload":   payloadB64,
 		"signature": signatureB64,
 	}
-
 	jwsBytes, _ := json.Marshal(jws)
 	return string(jwsBytes), nil
 }
@@ -525,281 +562,35 @@ func (c *OpenBaoClient) getNonce() (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	resp, err := http.Head(directory.NewNonce)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-
-	nonce := resp.Header.Get("Replay-Nonce")
-	if nonce == "" {
-		return "", fmt.Errorf("no nonce in response")
-	}
-
-	return nonce, nil
+	return resp.Header.Get("Replay-Nonce"), nil
 }
 
-// pemToBase64URL converts a PEM-encoded CSR to base64url-encoded DER
 func pemToBase64URL(pemData string) (string, error) {
-	// Remove PEM headers and decode base64
-	lines := strings.Split(pemData, "\n")
-	var derBase64 strings.Builder
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "-----") {
-			continue
-		}
-		derBase64.WriteString(line)
-	}
-
-	// Decode standard base64 to DER
-	derBytes, err := base64.StdEncoding.DecodeString(derBase64.String())
-	if err != nil {
-		return "", fmt.Errorf("failed to decode base64: %w", err)
-	}
-
-	// Re-encode as base64url (RFC 4648)
-	return base64.RawURLEncoding.EncodeToString(derBytes), nil
-}
-
-// EnrollTPMDevice enrolls a TPM device by configuring its EK root CA and allowlisting its permanent identifier
-func (c *OpenBaoClient) EnrollTPMDevice(ctx context.Context, permanentID, ekRootCAPEM, ekRootCAName string) error {
-	// Configure AK CA root certificate for AIK validation
-	// Note: In the new architecture, the EK root CA is configured in the AK CA trust store
-	// so that when we issue AIK certificates, we can validate the EK certificate chain
-	if err := c.configureAKCARootCA(ctx, ekRootCAName, ekRootCAPEM); err != nil {
-		return fmt.Errorf("failed to configure AK CA root: %w", err)
-	}
-
-	log.Printf("✓ TPM device enrolled: %s (root CA: %s)", permanentID, ekRootCAName)
-
-	// TODO: Optionally implement allow/blocklist enforcement here in the server module
-	// This would check permanentID against a server-side allow/blocklist before
-	// allowing AIK certificate issuance in ProvisionIAKCertificate()
-
-	return nil
-}
-
-// configureAKCARootCA configures an AK CA root certificate in OpenBao
-// This is used during enrollment to configure manufacturer EK root CAs
-func (c *OpenBaoClient) configureAKCARootCA(ctx context.Context, name, certPEM string) error {
-	url := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots/%s", c.baseURL, name)
-
-	payload := map[string]interface{}{
-		"certificate": certPEM,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(payloadBytes)))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("X-Vault-Token", c.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to configure EK root CA (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	return nil
-}
-
-// ProvisionIAKCertificate issues an IAK certificate for a TPM attestation key (AK mode)
-// This acts as a Privacy CA, issuing IAK certificates for TPMs without manufacturer-provisioned IAK
-// The client must provide a CSR created with the AK private key in the TPM
-func (c *OpenBaoClient) ProvisionIAKCertificate(
-	ctx context.Context,
-	permanentID string,
-	akCSRPEM string,
-	ekCertPEM string,
-) (iakCertPEM, iakRootCAPEM, notBefore, notAfter string, err error) {
-	log.Printf("Provisioning IAK certificate for permanent ID: %s", permanentID)
-
-	// 1. Verify device is enrolled
-	enrolled, err := c.isTPMEnrolled(ctx, permanentID)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to check enrollment status: %w", err)
-	}
-	if !enrolled {
-		return "", "", "", "", fmt.Errorf("device not enrolled - call EnrollTPM first")
-	}
-
-	// 2. Parse and validate EK certificate
-	block, _ := pem.Decode([]byte(ekCertPEM))
+	block, _ := pem.Decode([]byte(pemData))
 	if block == nil {
-		return "", "", "", "", fmt.Errorf("failed to decode EK certificate PEM")
+		return "", fmt.Errorf("failed to decode PEM")
 	}
-
-	ekCert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse EK certificate: %w", err)
-	}
-
-	// 3. Validate EK certificate against enrolled root CAs
-	_, ekRootCAName, err := c.findMatchingEKRootCA(ctx, ekCert)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to find matching EK root CA: %w", err)
-	}
-
-	log.Printf("✓ EK certificate validated against enrolled root CA: %s", ekRootCAName)
-
-	// 4. Validate the CSR format
-	csrBlock, _ := pem.Decode([]byte(akCSRPEM))
-	if csrBlock == nil || csrBlock.Type != "CERTIFICATE REQUEST" {
-		return "", "", "", "", fmt.Errorf("failed to decode AK CSR PEM")
-	}
-
-	csr, err := x509.ParseCertificateRequest(csrBlock.Bytes)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse AK CSR: %w", err)
-	}
-
-	// Verify CSR signature to ensure it was signed with the AK private key
-	if err := csr.CheckSignature(); err != nil {
-		return "", "", "", "", fmt.Errorf("invalid CSR signature: %w", err)
-	}
-
-	log.Printf("✓ AK CSR validated: subject=%s", csr.Subject.String())
-
-	// 5. Sign the CSR using OpenBao /pki-ak mount
-	signPayload := map[string]interface{}{
-		"csr":         akCSRPEM,
-		"common_name": fmt.Sprintf("TPM AIK - %s", permanentID),
-		"ttl":         "8760h", // 1 year
-	}
-
-	signPayloadJSON, err := json.Marshal(signPayload)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to marshal sign request: %w", err)
-	}
-
-	signURL := fmt.Sprintf("%s/v1/pki-ak/sign/aik-device", c.baseURL)
-	req, err := http.NewRequestWithContext(ctx, "POST", signURL, bytes.NewReader(signPayloadJSON))
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to create sign request: %w", err)
-	}
-
-	req.Header.Set("X-Vault-Token", c.token)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to sign AIK certificate: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to read sign response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", "", "", fmt.Errorf("sign AIK certificate failed (status %d): %s", resp.StatusCode, string(body))
-	}
-
-	var signResp struct {
-		Data struct {
-			Certificate string   `json:"certificate"`
-			CAChain     []string `json:"ca_chain"`
-		} `json:"data"`
-	}
-
-	if err := json.Unmarshal(body, &signResp); err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse sign response: %w", err)
-	}
-
-	iakCertPEM = signResp.Data.Certificate
-
-	// 6. Get the AK CA root certificate
-	rootCAURL := fmt.Sprintf("%s/v1/pki-ak/cert/ca", c.baseURL)
-	rootReq, err := http.NewRequestWithContext(ctx, "GET", rootCAURL, nil)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to create root CA request: %w", err)
-	}
-
-	rootReq.Header.Set("X-Vault-Token", c.token)
-
-	rootResp, err := c.httpClient.Do(rootReq)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to get AK CA root: %w", err)
-	}
-	defer rootResp.Body.Close()
-
-	rootBody, err := io.ReadAll(rootResp.Body)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to read root CA response: %w", err)
-	}
-
-	if rootResp.StatusCode != http.StatusOK {
-		return "", "", "", "", fmt.Errorf("get AK CA root failed (status %d): %s", rootResp.StatusCode, string(rootBody))
-	}
-
-	iakRootCAPEM = string(rootBody)
-
-	// 7. Parse the issued certificate to get validity period
-	iakBlock, _ := pem.Decode([]byte(iakCertPEM))
-	if iakBlock == nil {
-		return "", "", "", "", fmt.Errorf("failed to decode issued AIK certificate")
-	}
-
-	iakCert, err := x509.ParseCertificate(iakBlock.Bytes)
-	if err != nil {
-		return "", "", "", "", fmt.Errorf("failed to parse issued AIK certificate: %w", err)
-	}
-
-	notBefore = iakCert.NotBefore.Format(time.RFC3339)
-	notAfter = iakCert.NotAfter.Format(time.RFC3339)
-
-	log.Printf("✓ AIK certificate issued successfully via /pki-ak")
-	log.Printf("  Serial: %s", iakCert.SerialNumber.String())
-	log.Printf("  Subject: %s", iakCert.Subject.String())
-	log.Printf("  Valid from: %s", notBefore)
-	log.Printf("  Valid until: %s", notAfter)
-
-	return iakCertPEM, iakRootCAPEM, notBefore, notAfter, nil
+	return base64.RawURLEncoding.EncodeToString(block.Bytes), nil
 }
 
-// isTPMEnrolled checks if a TPM device is enrolled
-// Currently returns true for all devices (permissive mode for PoC)
-// TODO: Implement server-side allow/blocklist enforcement here
-//       Store enrolled devices in a local database or configuration
-//       Check against allowlist/blocklist before issuing AIK certificates
-func (c *OpenBaoClient) isTPMEnrolled(ctx context.Context, permanentID string) (bool, error) {
-	// For PoC: Accept all devices that have called EnrollTPM
-	// In production: Check against server-side allow/blocklist database
-
-	// Verify that the EK root CA is configured (basic enrollment check)
-	// This ensures EnrollTPM was called at least once
+func (c *OpenBaoClient) IsTPMEnrolled(ctx context.Context, permanentID string) (bool, error) {
 	listURL := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots?list=true", c.baseURL)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", listURL, nil)
-	if err != nil {
-		return false, fmt.Errorf("failed to create request: %w", err)
-	}
-
+	req, _ := http.NewRequestWithContext(ctx, "GET", listURL, nil)
 	req.Header.Set("X-Vault-Token", c.token)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("failed to check AK CA roots: %w", err)
+		return false, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("no AK CA roots configured - call EnrollTPM first")
+		return false, nil
 	}
 
 	var listResp struct {
@@ -807,138 +598,324 @@ func (c *OpenBaoClient) isTPMEnrolled(ctx context.Context, permanentID string) (
 			Keys []string `json:"keys"`
 		} `json:"data"`
 	}
-
 	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
-		return false, fmt.Errorf("failed to decode AK CA roots list: %w", err)
+		return false, err
 	}
 
-	// If at least one AK CA root is configured, consider the system enrolled
-	// TODO: Track individual device enrollments in server-side database
-	if len(listResp.Data.Keys) == 0 {
-		return false, fmt.Errorf("no AK CA roots configured - call EnrollTPM first")
-	}
-
-	log.Printf("✓ Device enrollment check passed (permissive mode - %d AK CA roots configured)", len(listResp.Data.Keys))
-	return true, nil
+	return len(listResp.Data.Keys) > 0, nil
 }
 
-// findMatchingEKRootCA finds the EK root CA that validates the given EK certificate
-// It tries common manufacturer names based on the EK certificate issuer
-func (c *OpenBaoClient) findMatchingEKRootCA(ctx context.Context, ekCert *x509.Certificate) (*x509.Certificate, string, error) {
-	// Try to determine manufacturer from EK certificate issuer
-	issuer := ekCert.Issuer.String()
-	log.Printf("EK certificate issuer: %s", issuer)
+func (c *OpenBaoClient) ValidateEKCertificate(ctx context.Context, ekCert *x509.Certificate, trustedCAs map[string]*x509.Certificate) (*x509.Certificate, string, error) {
+	for _, cert := range trustedCAs {
+		if cert.Subject.String() == ekCert.Issuer.String() {
+			if err := ekCert.CheckSignatureFrom(cert); err == nil {
+				for caName, ca := range trustedCAs {
+					if ca.Equal(cert) {
+						return cert, caName, nil
+					}
+				}
+				return cert, "unknown", nil
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("EK certificate issuer not found in trusted CAs")
+}
 
-	// List of common manufacturer root CA names to try
-	manufacturerNames := []string{"swtpm-manufacturer", "stmicro", "intel", "infineon", "amd", "nuvoton"}
+func ComputeEKHashBase64(ekCert *x509.Certificate) (string, error) {
+	pubKeyDER, err := x509.MarshalPKIXPublicKey(ekCert.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(pubKeyDER)
+	return base64.StdEncoding.EncodeToString(hash[:]), nil
+}
 
-	// Try to prioritize based on issuer string
-	if strings.Contains(strings.ToLower(issuer), "swtpm") {
-		manufacturerNames = append([]string{"swtpm-manufacturer"}, manufacturerNames...)
-	} else if strings.Contains(strings.ToLower(issuer), "stm") {
-		manufacturerNames = append([]string{"stmicro"}, manufacturerNames...)
-	} else if strings.Contains(strings.ToLower(issuer), "intel") {
-		manufacturerNames = append([]string{"intel"}, manufacturerNames...)
-	} else if strings.Contains(strings.ToLower(issuer), "infineon") {
-		manufacturerNames = append([]string{"infineon"}, manufacturerNames...)
+// BuildUnsignedCSR creates a PKCS#10 CSR from a public key with a dummy signature.
+// This bypasses Go's x509.CreateCertificateRequest which validates signatures (Go 1.20+).
+// OpenBao's sign-verbatim endpoint with allow_unsigned_csr accepts these CSRs.
+//
+// This function is self-contained and can be replaced with a proper library later.
+// Supports: RSA, ECDSA (P-256, P-384, P-521), Ed25519
+func BuildUnsignedCSR(pubKey crypto.PublicKey, cn string, uriSANs []string) (string, error) {
+	csrDER, err := buildPKCS10CSR(pubKey, cn, uriSANs)
+	if err != nil {
+		return "", err
 	}
 
-	// Try each manufacturer root CA
-	for _, name := range manufacturerNames {
-		rootCA, err := c.getEKRootCA(ctx, name)
+	csrPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE REQUEST",
+		Bytes: csrDER,
+	})
+
+	return string(csrPEM), nil
+}
+
+// buildPKCS10CSR constructs a PKCS#10 CSR using raw ASN.1 encoding.
+// RFC 2986: PKCS #10 Certification Request Syntax
+//
+// CertificationRequest ::= SEQUENCE {
+//   certificationRequestInfo CertificationRequestInfo,
+//   signatureAlgorithm       AlgorithmIdentifier,
+//   signature                BIT STRING
+// }
+//
+// CertificationRequestInfo ::= SEQUENCE {
+//   version       INTEGER { v1(0) },
+//   subject       Name,
+//   subjectPKInfo SubjectPublicKeyInfo,
+//   attributes    [0] IMPLICIT Attributes
+// }
+func buildPKCS10CSR(pubKey crypto.PublicKey, cn string, uriSANs []string) ([]byte, error) {
+	// Build SubjectPublicKeyInfo
+	spki, err := buildSubjectPublicKeyInfo(pubKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build SPKI: %w", err)
+	}
+
+	// Build Subject Name (CN=...)
+	subject := pkix.Name{CommonName: cn}
+	subjectDER, err := asn1.Marshal(subject.ToRDNSequence())
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal subject: %w", err)
+	}
+
+	// Build attributes (including SAN extension if provided)
+	var attributes []asn1.RawValue
+	if len(uriSANs) > 0 {
+		sanAttr, err := buildSANAttribute(uriSANs)
 		if err != nil {
-			// Root CA not configured, try next
-			continue
+			return nil, fmt.Errorf("failed to build SAN attribute: %w", err)
 		}
-
-		// Try to verify EK cert against this root CA
-		// For PoC: Accept if issuer matches the configured root CA
-		// In production, this should do full chain validation with intermediates
-		roots := x509.NewCertPool()
-		roots.AddCert(rootCA)
-
-		// Try verification with the root CA
-		opts := x509.VerifyOptions{
-			Roots: roots,
-			// Allow any key usage for TPM EK certs
-			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-		}
-
-		if _, err := ekCert.Verify(opts); err == nil {
-			// Found matching root CA!
-			log.Printf("✓ Found matching EK root CA: %s", name)
-			return rootCA, name, nil
-		}
-
-		// Verification failed, might be due to intermediate CA
-		// For PoC: If the root CA subject matches the expected manufacturer, accept it
-		// This is a simplified check - in production, load and verify intermediate CAs
-		if strings.Contains(strings.ToLower(rootCA.Subject.String()), "swtpm") &&
-		   strings.Contains(strings.ToLower(issuer), "swtpm") {
-			log.Printf("✓ EK cert issuer matches manufacturer (intermediate CA present): %s", name)
-			return rootCA, name, nil
-		}
-		if strings.Contains(strings.ToLower(rootCA.Subject.String()), "stm") &&
-		   strings.Contains(strings.ToLower(issuer), "stm") {
-			log.Printf("✓ EK cert issuer matches manufacturer (intermediate CA present): %s", name)
-			return rootCA, name, nil
-		}
-		if strings.Contains(strings.ToLower(rootCA.Subject.String()), "intel") &&
-		   strings.Contains(strings.ToLower(issuer), "intel") {
-			log.Printf("✓ EK cert issuer matches manufacturer (intermediate CA present): %s", name)
-			return rootCA, name, nil
-		}
-		if strings.Contains(strings.ToLower(rootCA.Subject.String()), "infineon") &&
-		   strings.Contains(strings.ToLower(issuer), "infineon") {
-			log.Printf("✓ EK cert issuer matches manufacturer (intermediate CA present): %s", name)
-			return rootCA, name, nil
-		}
+		attributes = append(attributes, sanAttr)
 	}
 
-	return nil, "", fmt.Errorf("no configured EK root CA validates this EK certificate (issuer: %s)", issuer)
+	// Build CertificationRequestInfo
+	certReqInfo := pkcs10CertReqInfo{
+		Version:       0,
+		Subject:       asn1.RawValue{FullBytes: subjectDER},
+		SubjectPKInfo: spki,
+		Attributes:    attributes,
+	}
+
+	// Get signature algorithm and dummy signature size
+	sigAlg, sigLen := getSignatureAlgorithm(pubKey)
+
+	// Build complete CSR with dummy (zero) signature
+	csr := pkcs10CSR{
+		CertificationRequestInfo: certReqInfo,
+		SignatureAlgorithm:       sigAlg,
+		Signature: asn1.BitString{
+			Bytes:     make([]byte, sigLen),
+			BitLength: sigLen * 8,
+		},
+	}
+
+	return asn1.Marshal(csr)
 }
 
-// getEKRootCA retrieves a specific EK root CA by name
-func (c *OpenBaoClient) getEKRootCA(ctx context.Context, name string) (*x509.Certificate, error) {
-	url := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots/%s", c.baseURL, name)
+// OID for extensionRequest attribute (PKCS#9)
+var oidExtensionRequest = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 14}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// OID for Subject Alternative Name extension
+var oidSubjectAltName = asn1.ObjectIdentifier{2, 5, 29, 17}
+
+// buildSANAttribute builds the extensionRequest attribute containing SAN extension
+// RFC 2985: PKCS #9 extensionRequest attribute
+func buildSANAttribute(uriSANs []string) (asn1.RawValue, error) {
+	// Build GeneralNames sequence for URI SANs
+	// GeneralName ::= CHOICE { uniformResourceIdentifier [6] IA5String }
+	var generalNames []asn1.RawValue
+	for _, uri := range uriSANs {
+		// Tag 6 = uniformResourceIdentifier (IA5String, implicit)
+		generalNames = append(generalNames, asn1.RawValue{
+			Tag:   6,
+			Class: asn1.ClassContextSpecific,
+			Bytes: []byte(uri),
+		})
+	}
+
+	// Marshal GeneralNames sequence
+	sanValue, err := asn1.Marshal(generalNames)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return asn1.RawValue{}, err
 	}
 
-	req.Header.Set("X-Vault-Token", c.token)
-
-	resp, err := c.httpClient.Do(req)
+	// Build Extension: SEQUENCE { extnID, critical (optional), extnValue }
+	ext := pkix.Extension{
+		Id:    oidSubjectAltName,
+		Value: sanValue,
+	}
+	extDER, err := asn1.Marshal(ext)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get EK root CA: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("EK root CA not found (status %d)", resp.StatusCode)
+		return asn1.RawValue{}, err
 	}
 
-	var result struct {
-		Data struct {
-			Certificate string `json:"certificate"`
-		} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	// Parse the EK root CA certificate
-	block, _ := pem.Decode([]byte(result.Data.Certificate))
-	if block == nil {
-		return nil, fmt.Errorf("failed to decode EK root CA PEM")
-	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
+	// Build Extensions SEQUENCE
+	extensions := []asn1.RawValue{{FullBytes: extDER}}
+	extensionsDER, err := asn1.Marshal(extensions)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse EK root CA: %w", err)
+		return asn1.RawValue{}, err
 	}
 
-	return cert, nil
+	// Build Attribute: SEQUENCE { type OID, values SET }
+	// extensionRequest attribute contains a SET of Extensions
+	attrValue := asn1.RawValue{FullBytes: extensionsDER}
+	attrValues := []asn1.RawValue{attrValue}
+	attrValuesDER, err := asn1.MarshalWithParams(attrValues, "set")
+	if err != nil {
+		return asn1.RawValue{}, err
+	}
+
+	// Build the attribute structure
+	attr := struct {
+		Type   asn1.ObjectIdentifier
+		Values asn1.RawValue
+	}{
+		Type:   oidExtensionRequest,
+		Values: asn1.RawValue{FullBytes: attrValuesDER},
+	}
+
+	attrDER, err := asn1.Marshal(attr)
+	if err != nil {
+		return asn1.RawValue{}, err
+	}
+
+	return asn1.RawValue{FullBytes: attrDER}, nil
+}
+
+// ASN.1 structures for PKCS#10 CSR (RFC 2986)
+type pkcs10CSR struct {
+	CertificationRequestInfo pkcs10CertReqInfo
+	SignatureAlgorithm       pkix.AlgorithmIdentifier
+	Signature                asn1.BitString
+}
+
+type pkcs10CertReqInfo struct {
+	Version       int
+	Subject       asn1.RawValue
+	SubjectPKInfo pkcs10SPKI
+	Attributes    []asn1.RawValue `asn1:"tag:0"`
+}
+
+type pkcs10SPKI struct {
+	Algorithm pkix.AlgorithmIdentifier
+	PublicKey asn1.BitString
+}
+
+// OIDs for key types and signature algorithms
+var (
+	oidRSA             = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 1}
+	oidSHA256WithRSA   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}
+	oidECPublicKey     = asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}
+	oidECDSAWithSHA256 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2}
+	oidECDSAWithSHA384 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 3}
+	oidECDSAWithSHA512 = asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 4}
+	oidEd25519         = asn1.ObjectIdentifier{1, 3, 101, 112}
+	oidP256            = asn1.ObjectIdentifier{1, 2, 840, 10045, 3, 1, 7}
+	oidP384            = asn1.ObjectIdentifier{1, 3, 132, 0, 34}
+	oidP521            = asn1.ObjectIdentifier{1, 3, 132, 0, 35}
+)
+
+// buildSubjectPublicKeyInfo creates the SPKI structure for the given public key
+func buildSubjectPublicKeyInfo(pubKey crypto.PublicKey) (pkcs10SPKI, error) {
+	var spki pkcs10SPKI
+
+	switch key := pubKey.(type) {
+	case *rsa.PublicKey:
+		// RSA: SEQUENCE { modulus INTEGER, exponent INTEGER }
+		rsaPub := struct {
+			N *big.Int
+			E int
+		}{N: key.N, E: key.E}
+		pubKeyDER, err := asn1.Marshal(rsaPub)
+		if err != nil {
+			return spki, err
+		}
+		// RSA AlgorithmIdentifier requires NULL parameters per RFC 3279
+		spki = pkcs10SPKI{
+			Algorithm: pkix.AlgorithmIdentifier{
+				Algorithm:  oidRSA,
+				Parameters: asn1.NullRawValue,
+			},
+			PublicKey: asn1.BitString{Bytes: pubKeyDER, BitLength: len(pubKeyDER) * 8},
+		}
+
+	case *ecdsa.PublicKey:
+		// EC: uncompressed point 0x04 || X || Y
+		curveOID := getCurveOID(key.Curve)
+		byteLen := (key.Params().BitSize + 7) / 8
+		pubKeyBytes := make([]byte, 1+2*byteLen)
+		pubKeyBytes[0] = 0x04 // uncompressed point
+		key.X.FillBytes(pubKeyBytes[1 : 1+byteLen])
+		key.Y.FillBytes(pubKeyBytes[1+byteLen:])
+
+		curveOIDDER, _ := asn1.Marshal(curveOID)
+		spki = pkcs10SPKI{
+			Algorithm: pkix.AlgorithmIdentifier{
+				Algorithm:  oidECPublicKey,
+				Parameters: asn1.RawValue{FullBytes: curveOIDDER},
+			},
+			PublicKey: asn1.BitString{Bytes: pubKeyBytes, BitLength: len(pubKeyBytes) * 8},
+		}
+
+	case ed25519.PublicKey:
+		spki = pkcs10SPKI{
+			Algorithm: pkix.AlgorithmIdentifier{Algorithm: oidEd25519},
+			PublicKey: asn1.BitString{Bytes: key, BitLength: len(key) * 8},
+		}
+
+	default:
+		return spki, fmt.Errorf("unsupported key type: %T", pubKey)
+	}
+
+	return spki, nil
+}
+
+// getSignatureAlgorithm returns the signature algorithm and dummy signature size
+func getSignatureAlgorithm(pubKey crypto.PublicKey) (pkix.AlgorithmIdentifier, int) {
+	switch key := pubKey.(type) {
+	case *rsa.PublicKey:
+		return pkix.AlgorithmIdentifier{Algorithm: oidSHA256WithRSA}, (key.N.BitLen() + 7) / 8
+
+	case *ecdsa.PublicKey:
+		byteLen := (key.Params().BitSize + 7) / 8
+		// ECDSA signature: ASN.1 SEQUENCE { INTEGER r, INTEGER s }
+		// Max size with padding: 2 (seq) + 2 (len) + 2 (int tag+len) + byteLen+1 + 2 + byteLen+1
+		sigLen := 2 + 2 + byteLen + 1 + 2 + byteLen + 1
+		sigAlg := getECDSASigAlgorithm(key.Curve)
+		return pkix.AlgorithmIdentifier{Algorithm: sigAlg}, sigLen
+
+	case ed25519.PublicKey:
+		return pkix.AlgorithmIdentifier{Algorithm: oidEd25519}, ed25519.SignatureSize
+
+	default:
+		// Fallback to RSA SHA256
+		return pkix.AlgorithmIdentifier{Algorithm: oidSHA256WithRSA}, 256
+	}
+}
+
+func getCurveOID(curve elliptic.Curve) asn1.ObjectIdentifier {
+	switch curve {
+	case elliptic.P256():
+		return oidP256
+	case elliptic.P384():
+		return oidP384
+	case elliptic.P521():
+		return oidP521
+	default:
+		return oidP256
+	}
+}
+
+func getECDSASigAlgorithm(curve elliptic.Curve) asn1.ObjectIdentifier {
+	switch curve {
+	case elliptic.P256():
+		return oidECDSAWithSHA256
+	case elliptic.P384():
+		return oidECDSAWithSHA384
+	case elliptic.P521():
+		return oidECDSAWithSHA512
+	default:
+		return oidECDSAWithSHA256
+	}
 }

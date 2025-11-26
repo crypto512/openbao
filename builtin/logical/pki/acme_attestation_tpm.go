@@ -106,6 +106,14 @@ func (v *TPMAttestationValidator) ValidateAttestation(
 			pubAreaName, attestData.AttestedCertify.Name)
 	}
 
+	// Extract the attested public key from pubArea
+	// Per draft-acme-device-attest-07 Section 5, the server MUST verify
+	// that the CSR contains this public key before issuing the certificate
+	attestedPublicKey, err := pubKey.ToPublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract public key from pubArea: %w", err)
+	}
+
 	// Extract permanent identifier from AIK certificate
 	permanentID, err := ExtractPermanentIdentifierFromCert(aikCert)
 	if err != nil {
@@ -117,6 +125,7 @@ func (v *TPMAttestationValidator) ValidateAttestation(
 		PermanentIdentifier: permanentID,
 		Format:              AttestationFormatTPM,
 		Certificate:         aikCert,
+		AttestedPublicKey:   attestedPublicKey,
 		Metadata: map[string]interface{}{
 			"tpm_version": stmt.Ver,
 			"alg":         stmt.Alg,
@@ -164,34 +173,25 @@ func (v *TPMAttestationValidator) parseTPMAttestationStatement(attStmt map[strin
 	return &stmt, nil
 }
 
-// coseAlgToHashAlg converts a COSE algorithm identifier to a crypto.Hash
-// COSE Algorithm Registry: https://www.iana.org/assignments/cose/cose.xhtml#algorithms
-func coseAlgToHashAlg(alg int64) (crypto.Hash, error) {
-	switch alg {
-	case -257: // RS256
-		return crypto.SHA256, nil
-	case -258: // RS384
-		return crypto.SHA384, nil
-	case -259: // RS512
-		return crypto.SHA512, nil
-	case -7: // ES256
-		return crypto.SHA256, nil
-	case -35: // ES384
-		return crypto.SHA384, nil
-	case -36: // ES512
-		return crypto.SHA512, nil
-	default:
-		return 0, fmt.Errorf("unsupported COSE algorithm identifier: %d", alg)
-	}
-}
-
-// verifyTPMSignature verifies a TPM signature over certInfo using the AIK certificate
-func verifyTPMSignature(aikCert *x509.Certificate, certInfo []byte, signature []byte, coseAlg int64) error {
-	// Get the hash algorithm from COSE algorithm identifier
-	hashAlg, err := coseAlgToHashAlg(coseAlg)
+// verifyTPMSignature verifies a TPM signature over certInfo using the AIK certificate.
+//
+// Per draft-acme-device-attest-07 Section 5.1, the sig field in TPM attestation
+// statements MUST contain a TPMT_SIGNATURE structure (TPM 2.0 Part 2, Section 11.3.4):
+//   - sigAlg (2 bytes) - the signature algorithm
+//   - signature union containing hash algorithm and actual signature bytes
+func verifyTPMSignature(aikCert *x509.Certificate, certInfo []byte, signature []byte, _ int64) error {
+	// Parse TPMT_SIGNATURE (required per draft-acme-device-attest-07)
+	rawSig, sigAlgID, tpmHashAlg, err := ParseTPMT_SIGNATURE(signature)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to parse TPMT_SIGNATURE: %w", err)
 	}
+
+	// Convert TPM hash algorithm to Go crypto.Hash
+	goHashAlg, supported := TPMHashAlgToGo(tpmHashAlg)
+	if !supported {
+		return fmt.Errorf("unsupported TPM hash algorithm: 0x%04x", tpmHashAlg)
+	}
+	hashAlg := crypto.Hash(goHashAlg)
 
 	// Hash the certInfo
 	var h hash.Hash
@@ -211,17 +211,22 @@ func verifyTPMSignature(aikCert *x509.Certificate, certInfo []byte, signature []
 	// Verify signature based on public key type
 	switch pub := aikCert.PublicKey.(type) {
 	case *rsa.PublicKey:
-		// RSA signature verification
-		return rsa.VerifyPKCS1v15(pub, hashAlg, digest, signature)
+		// Determine verification method based on TPM signature algorithm
+		if sigAlgID == TPM_ALG_RSAPSS {
+			// RSA-PSS signature verification
+			return rsa.VerifyPSS(pub, hashAlg, digest, rawSig, nil)
+		}
+		// Default to PKCS#1 v1.5 (RSASSA)
+		return rsa.VerifyPKCS1v15(pub, hashAlg, digest, rawSig)
 
 	case *ecdsa.PublicKey:
 		// ECDSA signature verification
-		// ECDSA signature in TPM format is r || s (concatenated)
-		if len(signature)%2 != 0 {
-			return fmt.Errorf("invalid ECDSA signature length: %d", len(signature))
+		// ECDSA signature from TPM is r || s (concatenated)
+		if len(rawSig)%2 != 0 {
+			return fmt.Errorf("invalid ECDSA signature length: %d", len(rawSig))
 		}
-		r := new(big.Int).SetBytes(signature[:len(signature)/2])
-		s := new(big.Int).SetBytes(signature[len(signature)/2:])
+		r := new(big.Int).SetBytes(rawSig[:len(rawSig)/2])
+		s := new(big.Int).SetBytes(rawSig[len(rawSig)/2:])
 
 		if !ecdsa.Verify(pub, digest, r, s) {
 			return fmt.Errorf("ECDSA signature verification failed")

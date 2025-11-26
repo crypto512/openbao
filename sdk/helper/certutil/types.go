@@ -842,6 +842,11 @@ type CreationParameters struct {
 	// Useful for adding complex extensions that cannot be represented via OtherSANs,
 	// such as hardware module names or other ASN.1 structures.
 	ExtraExtensions []pkix.Extension
+
+	// SkipCSRSignatureValidation allows signing CSRs without verifying the CSR signature.
+	// USE WITH CAUTION: Only enable for TPM attestation workflows where the public key
+	// is verified through other means (e.g., Privacy CA challenge-response).
+	SkipCSRSignatureValidation bool
 }
 
 type CreationBundle struct {

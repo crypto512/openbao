@@ -16,21 +16,24 @@ mkdir -p "${TPM_STATE_DIR}"
 echo "[1/3] Setting up manufacturer CA..."
 # Copy manufacturer CA files from mounted volumes to swtpm-localca state directory
 # swtpm_localca looks for these specific filenames in its statedir
+SWTPM_LOCALCA_DIR="/app/var/lib/swtpm-localca"
+mkdir -p "${SWTPM_LOCALCA_DIR}"
+
 if [ -d "/app/ca/intermediate" ] && [ -d "/app/ca/root" ]; then
     echo "Copying manufacturer CA files to swtpm-localca state directory..."
 
     # Copy intermediate CA private key as signing key
-    cp "/app/ca/intermediate/swtpm-intermediate-ca-key.pem" "/var/lib/swtpm-localca/signkey.pem"
-    chmod 600 "/var/lib/swtpm-localca/signkey.pem"
+    cp "/app/ca/intermediate/swtpm-intermediate-ca-key.pem" "${SWTPM_LOCALCA_DIR}/signkey.pem"
+    chmod 600 "${SWTPM_LOCALCA_DIR}/signkey.pem"
 
     # Copy intermediate CA certificate as issuer cert
-    cp "/app/ca/intermediate/SWTPM TPM EK Intermediate CA.crt" "/var/lib/swtpm-localca/issuercert.pem"
+    cp "/app/ca/intermediate/SWTPM TPM EK Intermediate CA.crt" "${SWTPM_LOCALCA_DIR}/issuercert.pem"
 
     # Copy root CA certificate
-    cp "/app/ca/root/SWTPM Manufacturer Root CA.crt" "/var/lib/swtpm-localca/swtpm-localca-rootca-cert.pem"
+    cp "/app/ca/root/SWTPM Manufacturer Root CA.crt" "${SWTPM_LOCALCA_DIR}/swtpm-localca-rootca-cert.pem"
 
     # Initialize certificate serial number
-    echo "02" > /var/lib/swtpm-localca/certserial
+    echo "02" > "${SWTPM_LOCALCA_DIR}/certserial"
 
     echo "✓ Manufacturer CA configured"
     echo "  Root CA: SWTPM Manufacturer Root CA"

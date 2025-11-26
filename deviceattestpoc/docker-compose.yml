@@ -82,10 +82,19 @@ services:
       - BAO_TOKEN=root
       - GRPC_PORT=50051
       - LOG_LEVEL=debug
+    volumes:
+      - ./ca:/ca:ro
+      - server-acme-accounts:/data/acme-accounts
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "50051"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+      start_period: 5s
     networks:
       - attestation-net
 
-  # Client - Requests certificates using TPM attestation (SWTPM)
+  # Client - Device attestation tools (SWTPM)
   client:
     build:
       context: .
@@ -96,16 +105,18 @@ services:
       tpm1:
         condition: service_healthy
       server:
-        condition: service_started
+        condition: service_healthy
     environment:
-      - SERVER_ADDR=server:50051
-      - CERT_COMMON_NAME=vpn-client-001.example.com
+      - GRPC_SERVER=server:50051
       - LOG_LEVEL=debug
       - TPM2TOOLS_TCTI=swtpm:host=tpm1,port=2321
       - TPM_SWTPM_HOST=tpm1
       - TPM_SWTPM_PORT=2321
+      - DA_JSON_PATH=/etc/da/da.json
+      - DA_OUTPUT_DIR=/certs
     volumes:
       - client-certs:/certs
+      - client-da-config:/etc/da
       - ./ca:/ca:ro
     networks:
       - attestation-net
@@ -121,16 +132,18 @@ services:
       server:
         condition: service_started
     environment:
-      - SERVER_ADDR=server:50051
-      - CERT_COMMON_NAME=vpn-client-hw.example.com
+      - GRPC_SERVER=server:50051
       - LOG_LEVEL=debug
       - TPM2TOOLS_TCTI=device:/dev/tpmrm0
+      - DA_JSON_PATH=/etc/da/da.json
+      - DA_OUTPUT_DIR=/certs
     devices:
       - /dev/tpm0:/dev/tpm0
       - /dev/tpmrm0:/dev/tpmrm0
     privileged: true
     volumes:
       - client-certs:/certs
+      - client-hw-da-config:/etc/da
       - ./ca:/ca:ro
     networks:
       - attestation-net
@@ -144,4 +157,7 @@ networks:
 volumes:
   openbao-data:
   client-certs:
+  client-da-config:
+  client-hw-da-config:
   swtpm-state:
+  server-acme-accounts:

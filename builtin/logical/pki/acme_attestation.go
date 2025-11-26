@@ -5,6 +5,7 @@ package pki
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -86,6 +87,10 @@ type AttestationResult struct {
 	Format AttestationFormat
 	// Certificate is the attestation key certificate
 	Certificate *x509.Certificate
+	// AttestedPublicKey is the public key from the attested object (pubArea)
+	// Per draft-acme-device-attest-07 Section 5, the server MUST verify that
+	// the CSR contains this public key before issuing the certificate.
+	AttestedPublicKey crypto.PublicKey
 	// Metadata contains format-specific metadata
 	Metadata map[string]interface{}
 }

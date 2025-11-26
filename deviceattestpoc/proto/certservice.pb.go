@@ -24,19 +24,13 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// CertRequest contains the certificate signing request for IPsec VPN
 type CertRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Common name for the certificate (e.g., "vpn-client-12345")
-	CommonName string `protobuf:"bytes,1,opt,name=common_name,json=commonName,proto3" json:"common_name,omitempty"`
-	// Subject Alternative Names - IP addresses
-	SanIps []string `protobuf:"bytes,2,rep,name=san_ips,json=sanIps,proto3" json:"san_ips,omitempty"`
-	// Subject Alternative Names - DNS names
-	SanDns []string `protobuf:"bytes,3,rep,name=san_dns,json=sanDns,proto3" json:"san_dns,omitempty"`
-	// PEM-encoded Certificate Signing Request
-	CsrPem string `protobuf:"bytes,4,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`
-	// Permanent identifier from TPM (serial number or device ID)
-	PermanentIdentifier string `protobuf:"bytes,5,opt,name=permanent_identifier,json=permanentIdentifier,proto3" json:"permanent_identifier,omitempty"`
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	CommonName          string                 `protobuf:"bytes,1,opt,name=common_name,json=commonName,proto3" json:"common_name,omitempty"`
+	SanIps              []string               `protobuf:"bytes,2,rep,name=san_ips,json=sanIps,proto3" json:"san_ips,omitempty"`
+	SanDns              []string               `protobuf:"bytes,3,rep,name=san_dns,json=sanDns,proto3" json:"san_dns,omitempty"`
+	PermanentIdentifier string                 `protobuf:"bytes,4,opt,name=permanent_identifier,json=permanentIdentifier,proto3" json:"permanent_identifier,omitempty"`
+	Usage               string                 `protobuf:"bytes,5,opt,name=usage,proto3" json:"usage,omitempty"` // Certificate usage (e.g., "ipsec-vpn", "wifi") - maps to PKI role
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
 }
@@ -92,13 +86,6 @@ func (x *CertRequest) GetSanDns() []string {
 	return nil
 }
 
-func (x *CertRequest) GetCsrPem() string {
-	if x != nil {
-		return x.CsrPem
-	}
-	return ""
-}
-
 func (x *CertRequest) GetPermanentIdentifier() string {
 	if x != nil {
 		return x.PermanentIdentifier
@@ -106,18 +93,19 @@ func (x *CertRequest) GetPermanentIdentifier() string {
 	return ""
 }
 
-// AttestationSubmit contains the TPM attestation object
+func (x *CertRequest) GetUsage() string {
+	if x != nil {
+		return x.Usage
+	}
+	return ""
+}
+
 type AttestationSubmit struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Order ID from the initial certificate request
-	OrderId string `protobuf:"bytes,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
-	// Authorization URL for the challenge
-	AuthorizationUrl string `protobuf:"bytes,2,opt,name=authorization_url,json=authorizationUrl,proto3" json:"authorization_url,omitempty"`
-	// Challenge URL to submit attestation to
-	ChallengeUrl string `protobuf:"bytes,3,opt,name=challenge_url,json=challengeUrl,proto3" json:"challenge_url,omitempty"`
-	// Base64url-encoded CBOR attestation object
-	// Format: {fmt: "tpm", attStmt: {ver, alg, x5c, sig, certInfo, pubArea}}
-	AttestationObject string `protobuf:"bytes,4,opt,name=attestation_object,json=attestationObject,proto3" json:"attestation_object,omitempty"`
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	OrderId           string                 `protobuf:"bytes,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
+	AuthorizationUrl  string                 `protobuf:"bytes,2,opt,name=authorization_url,json=authorizationUrl,proto3" json:"authorization_url,omitempty"`
+	ChallengeUrl      string                 `protobuf:"bytes,3,opt,name=challenge_url,json=challengeUrl,proto3" json:"challenge_url,omitempty"`
+	AttestationObject string                 `protobuf:"bytes,4,opt,name=attestation_object,json=attestationObject,proto3" json:"attestation_object,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -180,18 +168,68 @@ func (x *AttestationSubmit) GetAttestationObject() string {
 	return ""
 }
 
-// GetCertRequest requests the certificate for a finalized order
+type FinalizeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OrderId       string                 `protobuf:"bytes,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
+	CsrPem        string                 `protobuf:"bytes,2,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FinalizeRequest) Reset() {
+	*x = FinalizeRequest{}
+	mi := &file_proto_certservice_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FinalizeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FinalizeRequest) ProtoMessage() {}
+
+func (x *FinalizeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_certservice_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FinalizeRequest.ProtoReflect.Descriptor instead.
+func (*FinalizeRequest) Descriptor() ([]byte, []int) {
+	return file_proto_certservice_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *FinalizeRequest) GetOrderId() string {
+	if x != nil {
+		return x.OrderId
+	}
+	return ""
+}
+
+func (x *FinalizeRequest) GetCsrPem() string {
+	if x != nil {
+		return x.CsrPem
+	}
+	return ""
+}
+
 type GetCertRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Order ID to retrieve certificate for
-	OrderId       string `protobuf:"bytes,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OrderId       string                 `protobuf:"bytes,1,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetCertRequest) Reset() {
 	*x = GetCertRequest{}
-	mi := &file_proto_certservice_proto_msgTypes[2]
+	mi := &file_proto_certservice_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -203,7 +241,7 @@ func (x *GetCertRequest) String() string {
 func (*GetCertRequest) ProtoMessage() {}
 
 func (x *GetCertRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_certservice_proto_msgTypes[2]
+	mi := &file_proto_certservice_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -216,7 +254,7 @@ func (x *GetCertRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCertRequest.ProtoReflect.Descriptor instead.
 func (*GetCertRequest) Descriptor() ([]byte, []int) {
-	return file_proto_certservice_proto_rawDescGZIP(), []int{2}
+	return file_proto_certservice_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *GetCertRequest) GetOrderId() string {
@@ -226,36 +264,26 @@ func (x *GetCertRequest) GetOrderId() string {
 	return ""
 }
 
-// CertResponse contains the response for certificate operations
 type CertResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Status of the request: "pending", "ready", "valid", "invalid", "error"
-	Status string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
-	// Order ID for tracking the certificate request
-	OrderId string `protobuf:"bytes,2,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
-	// Authorization URL containing the challenge
-	AuthorizationUrl string `protobuf:"bytes,3,opt,name=authorization_url,json=authorizationUrl,proto3" json:"authorization_url,omitempty"`
-	// Challenge URL for device-attest-01
-	ChallengeUrl string `protobuf:"bytes,4,opt,name=challenge_url,json=challengeUrl,proto3" json:"challenge_url,omitempty"`
-	// Challenge token for building key authorization
-	ChallengeToken string `protobuf:"bytes,5,opt,name=challenge_token,json=challengeToken,proto3" json:"challenge_token,omitempty"`
-	// Account thumbprint for key authorization (JWK thumbprint)
-	AccountThumbprint string `protobuf:"bytes,6,opt,name=account_thumbprint,json=accountThumbprint,proto3" json:"account_thumbprint,omitempty"`
-	// PEM-encoded certificate if status is "valid"
-	CertificatePem string `protobuf:"bytes,7,opt,name=certificate_pem,json=certificatePem,proto3" json:"certificate_pem,omitempty"`
-	// Certificate chain (intermediate + root) in PEM format
-	ChainPem []string `protobuf:"bytes,8,rep,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"`
-	// Error message if status is "error"
-	Error string `protobuf:"bytes,9,opt,name=error,proto3" json:"error,omitempty"`
-	// Additional information for debugging
-	Details       string `protobuf:"bytes,10,opt,name=details,proto3" json:"details,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Status            string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	OrderId           string                 `protobuf:"bytes,2,opt,name=order_id,json=orderId,proto3" json:"order_id,omitempty"`
+	AuthorizationUrl  string                 `protobuf:"bytes,3,opt,name=authorization_url,json=authorizationUrl,proto3" json:"authorization_url,omitempty"`
+	ChallengeUrl      string                 `protobuf:"bytes,4,opt,name=challenge_url,json=challengeUrl,proto3" json:"challenge_url,omitempty"`
+	ChallengeToken    string                 `protobuf:"bytes,5,opt,name=challenge_token,json=challengeToken,proto3" json:"challenge_token,omitempty"`
+	AccountThumbprint string                 `protobuf:"bytes,6,opt,name=account_thumbprint,json=accountThumbprint,proto3" json:"account_thumbprint,omitempty"`
+	FinalizeUrl       string                 `protobuf:"bytes,7,opt,name=finalize_url,json=finalizeUrl,proto3" json:"finalize_url,omitempty"`
+	CertificatePem    string                 `protobuf:"bytes,8,opt,name=certificate_pem,json=certificatePem,proto3" json:"certificate_pem,omitempty"`
+	ChainPem          []string               `protobuf:"bytes,9,rep,name=chain_pem,json=chainPem,proto3" json:"chain_pem,omitempty"`
+	Error             string                 `protobuf:"bytes,10,opt,name=error,proto3" json:"error,omitempty"`
+	Details           string                 `protobuf:"bytes,11,opt,name=details,proto3" json:"details,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *CertResponse) Reset() {
 	*x = CertResponse{}
-	mi := &file_proto_certservice_proto_msgTypes[3]
+	mi := &file_proto_certservice_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -267,7 +295,7 @@ func (x *CertResponse) String() string {
 func (*CertResponse) ProtoMessage() {}
 
 func (x *CertResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_certservice_proto_msgTypes[3]
+	mi := &file_proto_certservice_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -280,7 +308,7 @@ func (x *CertResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CertResponse.ProtoReflect.Descriptor instead.
 func (*CertResponse) Descriptor() ([]byte, []int) {
-	return file_proto_certservice_proto_rawDescGZIP(), []int{3}
+	return file_proto_certservice_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CertResponse) GetStatus() string {
@@ -325,6 +353,13 @@ func (x *CertResponse) GetAccountThumbprint() string {
 	return ""
 }
 
+func (x *CertResponse) GetFinalizeUrl() string {
+	if x != nil {
+		return x.FinalizeUrl
+	}
+	return ""
+}
+
 func (x *CertResponse) GetCertificatePem() string {
 	if x != nil {
 		return x.CertificatePem
@@ -353,28 +388,17 @@ func (x *CertResponse) GetDetails() string {
 	return ""
 }
 
-// TPMEnrollmentRequest contains TPM enrollment data sent by the client
-// WARNING: In production, this data MUST be provided by administrators through
-// secure out-of-band channels. This PoC allows clients to send it for demonstration
-// purposes only.
 type TPMEnrollmentRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// TPM permanent identifier to allowlist
-	PermanentIdentifier string `protobuf:"bytes,1,opt,name=permanent_identifier,json=permanentIdentifier,proto3" json:"permanent_identifier,omitempty"`
-	// PEM-encoded TPM EK root CA certificate
-	// This is the manufacturer's root certificate that signs the EK certificate chain
-	EkRootCaPem string `protobuf:"bytes,2,opt,name=ek_root_ca_pem,json=ekRootCaPem,proto3" json:"ek_root_ca_pem,omitempty"`
-	// Name/identifier for the EK root CA (e.g., "intel", "infineon")
-	EkRootCaName string `protobuf:"bytes,3,opt,name=ek_root_ca_name,json=ekRootCaName,proto3" json:"ek_root_ca_name,omitempty"`
-	// Optional: Description of the TPM device
-	DeviceDescription string `protobuf:"bytes,4,opt,name=device_description,json=deviceDescription,proto3" json:"device_description,omitempty"`
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	EkCertificatePem  string                 `protobuf:"bytes,1,opt,name=ek_certificate_pem,json=ekCertificatePem,proto3" json:"ek_certificate_pem,omitempty"`
+	DeviceDescription string                 `protobuf:"bytes,2,opt,name=device_description,json=deviceDescription,proto3" json:"device_description,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
 
 func (x *TPMEnrollmentRequest) Reset() {
 	*x = TPMEnrollmentRequest{}
-	mi := &file_proto_certservice_proto_msgTypes[4]
+	mi := &file_proto_certservice_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -386,7 +410,7 @@ func (x *TPMEnrollmentRequest) String() string {
 func (*TPMEnrollmentRequest) ProtoMessage() {}
 
 func (x *TPMEnrollmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_certservice_proto_msgTypes[4]
+	mi := &file_proto_certservice_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -399,26 +423,12 @@ func (x *TPMEnrollmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TPMEnrollmentRequest.ProtoReflect.Descriptor instead.
 func (*TPMEnrollmentRequest) Descriptor() ([]byte, []int) {
-	return file_proto_certservice_proto_rawDescGZIP(), []int{4}
+	return file_proto_certservice_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *TPMEnrollmentRequest) GetPermanentIdentifier() string {
+func (x *TPMEnrollmentRequest) GetEkCertificatePem() string {
 	if x != nil {
-		return x.PermanentIdentifier
-	}
-	return ""
-}
-
-func (x *TPMEnrollmentRequest) GetEkRootCaPem() string {
-	if x != nil {
-		return x.EkRootCaPem
-	}
-	return ""
-}
-
-func (x *TPMEnrollmentRequest) GetEkRootCaName() string {
-	if x != nil {
-		return x.EkRootCaName
+		return x.EkCertificatePem
 	}
 	return ""
 }
@@ -430,26 +440,19 @@ func (x *TPMEnrollmentRequest) GetDeviceDescription() string {
 	return ""
 }
 
-// EnrollmentResponse contains the result of TPM enrollment
 type EnrollmentResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Status: "success" or "error"
-	Status string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
-	// Error message if status is "error"
-	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	// Confirmation details
-	Details string `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
-	// The enrolled permanent identifier
-	PermanentIdentifier string `protobuf:"bytes,4,opt,name=permanent_identifier,json=permanentIdentifier,proto3" json:"permanent_identifier,omitempty"`
-	// The enrolled EK root CA name
-	EkRootCaName  string `protobuf:"bytes,5,opt,name=ek_root_ca_name,json=ekRootCaName,proto3" json:"ek_root_ca_name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Status              string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	Error               string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Details             string                 `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
+	PermanentIdentifier string                 `protobuf:"bytes,4,opt,name=permanent_identifier,json=permanentIdentifier,proto3" json:"permanent_identifier,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *EnrollmentResponse) Reset() {
 	*x = EnrollmentResponse{}
-	mi := &file_proto_certservice_proto_msgTypes[5]
+	mi := &file_proto_certservice_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -461,7 +464,7 @@ func (x *EnrollmentResponse) String() string {
 func (*EnrollmentResponse) ProtoMessage() {}
 
 func (x *EnrollmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_certservice_proto_msgTypes[5]
+	mi := &file_proto_certservice_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -474,7 +477,7 @@ func (x *EnrollmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnrollmentResponse.ProtoReflect.Descriptor instead.
 func (*EnrollmentResponse) Descriptor() ([]byte, []int) {
-	return file_proto_certservice_proto_rawDescGZIP(), []int{5}
+	return file_proto_certservice_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *EnrollmentResponse) GetStatus() string {
@@ -505,45 +508,31 @@ func (x *EnrollmentResponse) GetPermanentIdentifier() string {
 	return ""
 }
 
-func (x *EnrollmentResponse) GetEkRootCaName() string {
-	if x != nil {
-		return x.EkRootCaName
-	}
-	return ""
+type ProvisionLAKRequest struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	PermanentIdentifier string                 `protobuf:"bytes,1,opt,name=permanent_identifier,json=permanentIdentifier,proto3" json:"permanent_identifier,omitempty"`
+	AkParameters        []byte                 `protobuf:"bytes,2,opt,name=ak_parameters,json=akParameters,proto3" json:"ak_parameters,omitempty"`
+	EkPublic            []byte                 `protobuf:"bytes,3,opt,name=ek_public,json=ekPublic,proto3" json:"ek_public,omitempty"`
+	EkCertPem           string                 `protobuf:"bytes,4,opt,name=ek_cert_pem,json=ekCertPem,proto3" json:"ek_cert_pem,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
-// ProvisionAIKRequest requests an IAK certificate for a new attestation key
-// This is used in AK mode when TPM lacks manufacturer-provisioned IAK
-type ProvisionAIKRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// TPM permanent identifier (must be already enrolled)
-	PermanentIdentifier string `protobuf:"bytes,1,opt,name=permanent_identifier,json=permanentIdentifier,proto3" json:"permanent_identifier,omitempty"`
-	// PEM-encoded Certificate Signing Request for the AK
-	// The CSR must be created by the client using the AK private key in the TPM
-	// This ensures the issued certificate contains the AK public key from the TPM
-	AkCsrPem string `protobuf:"bytes,2,opt,name=ak_csr_pem,json=akCsrPem,proto3" json:"ak_csr_pem,omitempty"`
-	// PEM-encoded EK certificate for validation
-	// Must match the enrolled permanent_identifier
-	EkCertificatePem string `protobuf:"bytes,3,opt,name=ek_certificate_pem,json=ekCertificatePem,proto3" json:"ek_certificate_pem,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
-}
-
-func (x *ProvisionAIKRequest) Reset() {
-	*x = ProvisionAIKRequest{}
-	mi := &file_proto_certservice_proto_msgTypes[6]
+func (x *ProvisionLAKRequest) Reset() {
+	*x = ProvisionLAKRequest{}
+	mi := &file_proto_certservice_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ProvisionAIKRequest) String() string {
+func (x *ProvisionLAKRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ProvisionAIKRequest) ProtoMessage() {}
+func (*ProvisionLAKRequest) ProtoMessage() {}
 
-func (x *ProvisionAIKRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_certservice_proto_msgTypes[6]
+func (x *ProvisionLAKRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_certservice_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -554,67 +543,65 @@ func (x *ProvisionAIKRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ProvisionAIKRequest.ProtoReflect.Descriptor instead.
-func (*ProvisionAIKRequest) Descriptor() ([]byte, []int) {
-	return file_proto_certservice_proto_rawDescGZIP(), []int{6}
+// Deprecated: Use ProvisionLAKRequest.ProtoReflect.Descriptor instead.
+func (*ProvisionLAKRequest) Descriptor() ([]byte, []int) {
+	return file_proto_certservice_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *ProvisionAIKRequest) GetPermanentIdentifier() string {
+func (x *ProvisionLAKRequest) GetPermanentIdentifier() string {
 	if x != nil {
 		return x.PermanentIdentifier
 	}
 	return ""
 }
 
-func (x *ProvisionAIKRequest) GetAkCsrPem() string {
+func (x *ProvisionLAKRequest) GetAkParameters() []byte {
 	if x != nil {
-		return x.AkCsrPem
+		return x.AkParameters
+	}
+	return nil
+}
+
+func (x *ProvisionLAKRequest) GetEkPublic() []byte {
+	if x != nil {
+		return x.EkPublic
+	}
+	return nil
+}
+
+func (x *ProvisionLAKRequest) GetEkCertPem() string {
+	if x != nil {
+		return x.EkCertPem
 	}
 	return ""
 }
 
-func (x *ProvisionAIKRequest) GetEkCertificatePem() string {
-	if x != nil {
-		return x.EkCertificatePem
-	}
-	return ""
+type ProvisionLAKResponse struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Status              string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	Error               string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	EncryptedCredential []byte                 `protobuf:"bytes,3,opt,name=encrypted_credential,json=encryptedCredential,proto3" json:"encrypted_credential,omitempty"`
+	SessionId           string                 `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Details             string                 `protobuf:"bytes,5,opt,name=details,proto3" json:"details,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
-// ProvisionAIKResponse contains the OpenBao-issued IAK certificate
-type ProvisionAIKResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Status: "success" or "error"
-	Status string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
-	// Error message if status is "error"
-	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	// PEM-encoded AIK certificate signed by OpenBao /pki-ak CA
-	// This certificate can be used in TPM attestation (x5c field)
-	IakCertificatePem string `protobuf:"bytes,3,opt,name=iak_certificate_pem,json=iakCertificatePem,proto3" json:"iak_certificate_pem,omitempty"`
-	// PEM-encoded OpenBao /pki-ak root CA certificate
-	// For building the certificate chain
-	IakRootCaPem string `protobuf:"bytes,4,opt,name=iak_root_ca_pem,json=iakRootCaPem,proto3" json:"iak_root_ca_pem,omitempty"`
-	// Certificate validity period
-	NotBefore     string `protobuf:"bytes,5,opt,name=not_before,json=notBefore,proto3" json:"not_before,omitempty"`
-	NotAfter      string `protobuf:"bytes,6,opt,name=not_after,json=notAfter,proto3" json:"not_after,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ProvisionAIKResponse) Reset() {
-	*x = ProvisionAIKResponse{}
-	mi := &file_proto_certservice_proto_msgTypes[7]
+func (x *ProvisionLAKResponse) Reset() {
+	*x = ProvisionLAKResponse{}
+	mi := &file_proto_certservice_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ProvisionAIKResponse) String() string {
+func (x *ProvisionLAKResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ProvisionAIKResponse) ProtoMessage() {}
+func (*ProvisionLAKResponse) ProtoMessage() {}
 
-func (x *ProvisionAIKResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_certservice_proto_msgTypes[7]
+func (x *ProvisionLAKResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_certservice_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -625,47 +612,176 @@ func (x *ProvisionAIKResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ProvisionAIKResponse.ProtoReflect.Descriptor instead.
-func (*ProvisionAIKResponse) Descriptor() ([]byte, []int) {
-	return file_proto_certservice_proto_rawDescGZIP(), []int{7}
+// Deprecated: Use ProvisionLAKResponse.ProtoReflect.Descriptor instead.
+func (*ProvisionLAKResponse) Descriptor() ([]byte, []int) {
+	return file_proto_certservice_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *ProvisionAIKResponse) GetStatus() string {
+func (x *ProvisionLAKResponse) GetStatus() string {
 	if x != nil {
 		return x.Status
 	}
 	return ""
 }
 
-func (x *ProvisionAIKResponse) GetError() string {
+func (x *ProvisionLAKResponse) GetError() string {
 	if x != nil {
 		return x.Error
 	}
 	return ""
 }
 
-func (x *ProvisionAIKResponse) GetIakCertificatePem() string {
+func (x *ProvisionLAKResponse) GetEncryptedCredential() []byte {
 	if x != nil {
-		return x.IakCertificatePem
+		return x.EncryptedCredential
+	}
+	return nil
+}
+
+func (x *ProvisionLAKResponse) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
 	}
 	return ""
 }
 
-func (x *ProvisionAIKResponse) GetIakRootCaPem() string {
+func (x *ProvisionLAKResponse) GetDetails() string {
 	if x != nil {
-		return x.IakRootCaPem
+		return x.Details
 	}
 	return ""
 }
 
-func (x *ProvisionAIKResponse) GetNotBefore() string {
+type ActivateCredentialRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SessionId       string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	DecryptedSecret []byte                 `protobuf:"bytes,2,opt,name=decrypted_secret,json=decryptedSecret,proto3" json:"decrypted_secret,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ActivateCredentialRequest) Reset() {
+	*x = ActivateCredentialRequest{}
+	mi := &file_proto_certservice_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActivateCredentialRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActivateCredentialRequest) ProtoMessage() {}
+
+func (x *ActivateCredentialRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_certservice_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActivateCredentialRequest.ProtoReflect.Descriptor instead.
+func (*ActivateCredentialRequest) Descriptor() ([]byte, []int) {
+	return file_proto_certservice_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ActivateCredentialRequest) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ActivateCredentialRequest) GetDecryptedSecret() []byte {
+	if x != nil {
+		return x.DecryptedSecret
+	}
+	return nil
+}
+
+type ActivateCredentialResponse struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Status            string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	Error             string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	LakCertificatePem string                 `protobuf:"bytes,3,opt,name=lak_certificate_pem,json=lakCertificatePem,proto3" json:"lak_certificate_pem,omitempty"`
+	LakRootCaPem      string                 `protobuf:"bytes,4,opt,name=lak_root_ca_pem,json=lakRootCaPem,proto3" json:"lak_root_ca_pem,omitempty"`
+	NotBefore         string                 `protobuf:"bytes,5,opt,name=not_before,json=notBefore,proto3" json:"not_before,omitempty"`
+	NotAfter          string                 `protobuf:"bytes,6,opt,name=not_after,json=notAfter,proto3" json:"not_after,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *ActivateCredentialResponse) Reset() {
+	*x = ActivateCredentialResponse{}
+	mi := &file_proto_certservice_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActivateCredentialResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActivateCredentialResponse) ProtoMessage() {}
+
+func (x *ActivateCredentialResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_certservice_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActivateCredentialResponse.ProtoReflect.Descriptor instead.
+func (*ActivateCredentialResponse) Descriptor() ([]byte, []int) {
+	return file_proto_certservice_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ActivateCredentialResponse) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ActivateCredentialResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *ActivateCredentialResponse) GetLakCertificatePem() string {
+	if x != nil {
+		return x.LakCertificatePem
+	}
+	return ""
+}
+
+func (x *ActivateCredentialResponse) GetLakRootCaPem() string {
+	if x != nil {
+		return x.LakRootCaPem
+	}
+	return ""
+}
+
+func (x *ActivateCredentialResponse) GetNotBefore() string {
 	if x != nil {
 		return x.NotBefore
 	}
 	return ""
 }
 
-func (x *ProvisionAIKResponse) GetNotAfter() string {
+func (x *ActivateCredentialResponse) GetNotAfter() string {
 	if x != nil {
 		return x.NotAfter
 	}
@@ -676,63 +792,77 @@ var File_proto_certservice_proto protoreflect.FileDescriptor
 
 const file_proto_certservice_proto_rawDesc = "" +
 	"\n" +
-	"\x17proto/certservice.proto\x12\vcertservice\"\xac\x01\n" +
+	"\x17proto/certservice.proto\x12\vcertservice\"\xa9\x01\n" +
 	"\vCertRequest\x12\x1f\n" +
 	"\vcommon_name\x18\x01 \x01(\tR\n" +
 	"commonName\x12\x17\n" +
 	"\asan_ips\x18\x02 \x03(\tR\x06sanIps\x12\x17\n" +
-	"\asan_dns\x18\x03 \x03(\tR\x06sanDns\x12\x17\n" +
-	"\acsr_pem\x18\x04 \x01(\tR\x06csrPem\x121\n" +
-	"\x14permanent_identifier\x18\x05 \x01(\tR\x13permanentIdentifier\"\xaf\x01\n" +
+	"\asan_dns\x18\x03 \x03(\tR\x06sanDns\x121\n" +
+	"\x14permanent_identifier\x18\x04 \x01(\tR\x13permanentIdentifier\x12\x14\n" +
+	"\x05usage\x18\x05 \x01(\tR\x05usage\"\xaf\x01\n" +
 	"\x11AttestationSubmit\x12\x19\n" +
 	"\border_id\x18\x01 \x01(\tR\aorderId\x12+\n" +
 	"\x11authorization_url\x18\x02 \x01(\tR\x10authorizationUrl\x12#\n" +
 	"\rchallenge_url\x18\x03 \x01(\tR\fchallengeUrl\x12-\n" +
-	"\x12attestation_object\x18\x04 \x01(\tR\x11attestationObject\"+\n" +
+	"\x12attestation_object\x18\x04 \x01(\tR\x11attestationObject\"E\n" +
+	"\x0fFinalizeRequest\x12\x19\n" +
+	"\border_id\x18\x01 \x01(\tR\aorderId\x12\x17\n" +
+	"\acsr_pem\x18\x02 \x01(\tR\x06csrPem\"+\n" +
 	"\x0eGetCertRequest\x12\x19\n" +
-	"\border_id\x18\x01 \x01(\tR\aorderId\"\xe1\x02\n" +
+	"\border_id\x18\x01 \x01(\tR\aorderId\"\x84\x03\n" +
 	"\fCertResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x19\n" +
 	"\border_id\x18\x02 \x01(\tR\aorderId\x12+\n" +
 	"\x11authorization_url\x18\x03 \x01(\tR\x10authorizationUrl\x12#\n" +
 	"\rchallenge_url\x18\x04 \x01(\tR\fchallengeUrl\x12'\n" +
 	"\x0fchallenge_token\x18\x05 \x01(\tR\x0echallengeToken\x12-\n" +
-	"\x12account_thumbprint\x18\x06 \x01(\tR\x11accountThumbprint\x12'\n" +
-	"\x0fcertificate_pem\x18\a \x01(\tR\x0ecertificatePem\x12\x1b\n" +
-	"\tchain_pem\x18\b \x03(\tR\bchainPem\x12\x14\n" +
-	"\x05error\x18\t \x01(\tR\x05error\x12\x18\n" +
-	"\adetails\x18\n" +
-	" \x01(\tR\adetails\"\xc4\x01\n" +
-	"\x14TPMEnrollmentRequest\x121\n" +
-	"\x14permanent_identifier\x18\x01 \x01(\tR\x13permanentIdentifier\x12#\n" +
-	"\x0eek_root_ca_pem\x18\x02 \x01(\tR\vekRootCaPem\x12%\n" +
-	"\x0fek_root_ca_name\x18\x03 \x01(\tR\fekRootCaName\x12-\n" +
-	"\x12device_description\x18\x04 \x01(\tR\x11deviceDescription\"\xb6\x01\n" +
+	"\x12account_thumbprint\x18\x06 \x01(\tR\x11accountThumbprint\x12!\n" +
+	"\ffinalize_url\x18\a \x01(\tR\vfinalizeUrl\x12'\n" +
+	"\x0fcertificate_pem\x18\b \x01(\tR\x0ecertificatePem\x12\x1b\n" +
+	"\tchain_pem\x18\t \x03(\tR\bchainPem\x12\x14\n" +
+	"\x05error\x18\n" +
+	" \x01(\tR\x05error\x12\x18\n" +
+	"\adetails\x18\v \x01(\tR\adetails\"s\n" +
+	"\x14TPMEnrollmentRequest\x12,\n" +
+	"\x12ek_certificate_pem\x18\x01 \x01(\tR\x10ekCertificatePem\x12-\n" +
+	"\x12device_description\x18\x02 \x01(\tR\x11deviceDescription\"\x8f\x01\n" +
 	"\x12EnrollmentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12\x18\n" +
 	"\adetails\x18\x03 \x01(\tR\adetails\x121\n" +
-	"\x14permanent_identifier\x18\x04 \x01(\tR\x13permanentIdentifier\x12%\n" +
-	"\x0fek_root_ca_name\x18\x05 \x01(\tR\fekRootCaName\"\x94\x01\n" +
-	"\x13ProvisionAIKRequest\x121\n" +
-	"\x14permanent_identifier\x18\x01 \x01(\tR\x13permanentIdentifier\x12\x1c\n" +
+	"\x14permanent_identifier\x18\x04 \x01(\tR\x13permanentIdentifier\"\xaa\x01\n" +
+	"\x13ProvisionLAKRequest\x121\n" +
+	"\x14permanent_identifier\x18\x01 \x01(\tR\x13permanentIdentifier\x12#\n" +
+	"\rak_parameters\x18\x02 \x01(\fR\fakParameters\x12\x1b\n" +
+	"\tek_public\x18\x03 \x01(\fR\bekPublic\x12\x1e\n" +
+	"\vek_cert_pem\x18\x04 \x01(\tR\tekCertPem\"\xb0\x01\n" +
+	"\x14ProvisionLAKResponse\x12\x16\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x121\n" +
+	"\x14encrypted_credential\x18\x03 \x01(\fR\x13encryptedCredential\x12\x1d\n" +
 	"\n" +
-	"ak_csr_pem\x18\x02 \x01(\tR\bakCsrPem\x12,\n" +
-	"\x12ek_certificate_pem\x18\x03 \x01(\tR\x10ekCertificatePem\"\xd7\x01\n" +
-	"\x14ProvisionAIKResponse\x12\x16\n" +
+	"session_id\x18\x04 \x01(\tR\tsessionId\x12\x18\n" +
+	"\adetails\x18\x05 \x01(\tR\adetails\"e\n" +
+	"\x19ActivateCredentialRequest\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12)\n" +
+	"\x10decrypted_secret\x18\x02 \x01(\fR\x0fdecryptedSecret\"\xdd\x01\n" +
+	"\x1aActivateCredentialResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12.\n" +
-	"\x13iak_certificate_pem\x18\x03 \x01(\tR\x11iakCertificatePem\x12%\n" +
-	"\x0fiak_root_ca_pem\x18\x04 \x01(\tR\fiakRootCaPem\x12\x1d\n" +
+	"\x13lak_certificate_pem\x18\x03 \x01(\tR\x11lakCertificatePem\x12%\n" +
+	"\x0flak_root_ca_pem\x18\x04 \x01(\tR\flakRootCaPem\x12\x1d\n" +
 	"\n" +
 	"not_before\x18\x05 \x01(\tR\tnotBefore\x12\x1b\n" +
-	"\tnot_after\x18\x06 \x01(\tR\bnotAfter2\x9f\x03\n" +
+	"\tnot_after\x18\x06 \x01(\tR\bnotAfter2\xd0\x04\n" +
 	"\x12CertificateService\x12I\n" +
 	"\x12RequestCertificate\x12\x18.certservice.CertRequest\x1a\x19.certservice.CertResponse\x12N\n" +
 	"\x11SubmitAttestation\x12\x1e.certservice.AttestationSubmit\x1a\x19.certservice.CertResponse\x12H\n" +
+	"\rFinalizeOrder\x12\x1c.certservice.FinalizeRequest\x1a\x19.certservice.CertResponse\x12H\n" +
 	"\x0eGetCertificate\x12\x1b.certservice.GetCertRequest\x1a\x19.certservice.CertResponse\x12O\n" +
 	"\tEnrollTPM\x12!.certservice.TPMEnrollmentRequest\x1a\x1f.certservice.EnrollmentResponse\x12S\n" +
-	"\fProvisionAIK\x12 .certservice.ProvisionAIKRequest\x1a!.certservice.ProvisionAIKResponseB>Z<github.com/openbao/openbao/deviceattestpoc/proto;certserviceb\x06proto3"
+	"\fProvisionLAK\x12 .certservice.ProvisionLAKRequest\x1a!.certservice.ProvisionLAKResponse\x12e\n" +
+	"\x12ActivateCredential\x12&.certservice.ActivateCredentialRequest\x1a'.certservice.ActivateCredentialResponseB>Z<github.com/openbao/openbao/deviceattestpoc/proto;certserviceb\x06proto3"
 
 var (
 	file_proto_certservice_proto_rawDescOnce sync.Once
@@ -746,33 +876,40 @@ func file_proto_certservice_proto_rawDescGZIP() []byte {
 	return file_proto_certservice_proto_rawDescData
 }
 
-var file_proto_certservice_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_proto_certservice_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_proto_certservice_proto_goTypes = []any{
-	(*CertRequest)(nil),          // 0: certservice.CertRequest
-	(*AttestationSubmit)(nil),    // 1: certservice.AttestationSubmit
-	(*GetCertRequest)(nil),       // 2: certservice.GetCertRequest
-	(*CertResponse)(nil),         // 3: certservice.CertResponse
-	(*TPMEnrollmentRequest)(nil), // 4: certservice.TPMEnrollmentRequest
-	(*EnrollmentResponse)(nil),   // 5: certservice.EnrollmentResponse
-	(*ProvisionAIKRequest)(nil),  // 6: certservice.ProvisionAIKRequest
-	(*ProvisionAIKResponse)(nil), // 7: certservice.ProvisionAIKResponse
+	(*CertRequest)(nil),                // 0: certservice.CertRequest
+	(*AttestationSubmit)(nil),          // 1: certservice.AttestationSubmit
+	(*FinalizeRequest)(nil),            // 2: certservice.FinalizeRequest
+	(*GetCertRequest)(nil),             // 3: certservice.GetCertRequest
+	(*CertResponse)(nil),               // 4: certservice.CertResponse
+	(*TPMEnrollmentRequest)(nil),       // 5: certservice.TPMEnrollmentRequest
+	(*EnrollmentResponse)(nil),         // 6: certservice.EnrollmentResponse
+	(*ProvisionLAKRequest)(nil),        // 7: certservice.ProvisionLAKRequest
+	(*ProvisionLAKResponse)(nil),       // 8: certservice.ProvisionLAKResponse
+	(*ActivateCredentialRequest)(nil),  // 9: certservice.ActivateCredentialRequest
+	(*ActivateCredentialResponse)(nil), // 10: certservice.ActivateCredentialResponse
 }
 var file_proto_certservice_proto_depIdxs = []int32{
-	0, // 0: certservice.CertificateService.RequestCertificate:input_type -> certservice.CertRequest
-	1, // 1: certservice.CertificateService.SubmitAttestation:input_type -> certservice.AttestationSubmit
-	2, // 2: certservice.CertificateService.GetCertificate:input_type -> certservice.GetCertRequest
-	4, // 3: certservice.CertificateService.EnrollTPM:input_type -> certservice.TPMEnrollmentRequest
-	6, // 4: certservice.CertificateService.ProvisionAIK:input_type -> certservice.ProvisionAIKRequest
-	3, // 5: certservice.CertificateService.RequestCertificate:output_type -> certservice.CertResponse
-	3, // 6: certservice.CertificateService.SubmitAttestation:output_type -> certservice.CertResponse
-	3, // 7: certservice.CertificateService.GetCertificate:output_type -> certservice.CertResponse
-	5, // 8: certservice.CertificateService.EnrollTPM:output_type -> certservice.EnrollmentResponse
-	7, // 9: certservice.CertificateService.ProvisionAIK:output_type -> certservice.ProvisionAIKResponse
-	5, // [5:10] is the sub-list for method output_type
-	0, // [0:5] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: certservice.CertificateService.RequestCertificate:input_type -> certservice.CertRequest
+	1,  // 1: certservice.CertificateService.SubmitAttestation:input_type -> certservice.AttestationSubmit
+	2,  // 2: certservice.CertificateService.FinalizeOrder:input_type -> certservice.FinalizeRequest
+	3,  // 3: certservice.CertificateService.GetCertificate:input_type -> certservice.GetCertRequest
+	5,  // 4: certservice.CertificateService.EnrollTPM:input_type -> certservice.TPMEnrollmentRequest
+	7,  // 5: certservice.CertificateService.ProvisionLAK:input_type -> certservice.ProvisionLAKRequest
+	9,  // 6: certservice.CertificateService.ActivateCredential:input_type -> certservice.ActivateCredentialRequest
+	4,  // 7: certservice.CertificateService.RequestCertificate:output_type -> certservice.CertResponse
+	4,  // 8: certservice.CertificateService.SubmitAttestation:output_type -> certservice.CertResponse
+	4,  // 9: certservice.CertificateService.FinalizeOrder:output_type -> certservice.CertResponse
+	4,  // 10: certservice.CertificateService.GetCertificate:output_type -> certservice.CertResponse
+	6,  // 11: certservice.CertificateService.EnrollTPM:output_type -> certservice.EnrollmentResponse
+	8,  // 12: certservice.CertificateService.ProvisionLAK:output_type -> certservice.ProvisionLAKResponse
+	10, // 13: certservice.CertificateService.ActivateCredential:output_type -> certservice.ActivateCredentialResponse
+	7,  // [7:14] is the sub-list for method output_type
+	0,  // [0:7] is the sub-list for method input_type
+	0,  // [0:0] is the sub-list for extension type_name
+	0,  // [0:0] is the sub-list for extension extendee
+	0,  // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_proto_certservice_proto_init() }
@@ -786,7 +923,7 @@ func file_proto_certservice_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_certservice_proto_rawDesc), len(file_proto_certservice_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

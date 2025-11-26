@@ -104,8 +104,11 @@ func (s *SimulatedTPM) GenerateAttestation(t *testing.T, keyAuthorization string
 
 	// Sign certInfo with AIK key
 	hash := sha256.Sum256(certInfo)
-	signature, err := rsa.SignPKCS1v15(rand.Reader, s.aikKey, crypto.SHA256, hash[:])
+	rawSignature, err := rsa.SignPKCS1v15(rand.Reader, s.aikKey, crypto.SHA256, hash[:])
 	require.NoError(t, err)
+
+	// Wrap raw signature in TPMT_SIGNATURE structure
+	signature := s.createTPMTSignature(rawSignature, TPM_ALG_RSASSA, TPM_ALG_SHA256)
 
 	// Build attestation statement
 	attStmt := map[string]interface{}{
@@ -198,6 +201,22 @@ func (s *SimulatedTPM) writeTPM2B(w *bytes.Buffer, data []byte) {
 	w.Write(data)
 }
 
+// createTPMTSignature creates a TPMT_SIGNATURE structure from raw signature bytes
+// Format: sigAlg (2 bytes) + hashAlg (2 bytes) + size (2 bytes) + signature bytes
+func (s *SimulatedTPM) createTPMTSignature(rawSig []byte, sigAlg, hashAlg uint16) []byte {
+	return createTPMTSignatureHelper(rawSig, sigAlg, hashAlg)
+}
+
+// createTPMTSignatureHelper is a standalone helper for creating TPMT_SIGNATURE structures
+func createTPMTSignatureHelper(rawSig []byte, sigAlg, hashAlg uint16) []byte {
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, sigAlg)
+	binary.Write(buf, binary.BigEndian, hashAlg)
+	binary.Write(buf, binary.BigEndian, uint16(len(rawSig)))
+	buf.Write(rawSig)
+	return buf.Bytes()
+}
+
 // TestACMEDeviceAttestationEndToEnd tests the complete ACME device attestation flow
 func TestACMEDeviceAttestationEndToEnd(t *testing.T) {
 	b, s := CreateBackendWithStorage(t)
@@ -253,7 +272,7 @@ func TestACMEDeviceAttestationEndToEnd(t *testing.T) {
 	// In a full implementation, this would be loaded from storage
 	config := &AttestationValidationConfig{
 		ValidateEKCertificate: true,
-		EKRootCertificates:    []*x509.Certificate{tpm.rootCA},
+		AKCARootCertificates:  []*x509.Certificate{tpm.rootCA},
 		RequiredFormats:       []AttestationFormat{AttestationFormatTPM},
 	}
 
@@ -403,8 +422,11 @@ func TestACMEDeviceAttestationEndToEnd_WithIntermediateCA(t *testing.T) {
 
 	// Sign with AIK key
 	hash := sha256.Sum256(certInfo)
-	signature, err := rsa.SignPKCS1v15(rand.Reader, aikKey, crypto.SHA256, hash[:])
+	rawSignature, err := rsa.SignPKCS1v15(rand.Reader, aikKey, crypto.SHA256, hash[:])
 	require.NoError(t, err)
+
+	// Wrap raw signature in TPMT_SIGNATURE structure
+	signature := createTPMTSignatureHelper(rawSignature, TPM_ALG_RSASSA, TPM_ALG_SHA256)
 
 	// Build attestation statement with FULL CHAIN (AIK + Intermediate)
 	attStmt := map[string]interface{}{
@@ -436,7 +458,7 @@ func TestACMEDeviceAttestationEndToEnd_WithIntermediateCA(t *testing.T) {
 	// Construct validation config directly
 	config := &AttestationValidationConfig{
 		ValidateEKCertificate: true,
-		EKRootCertificates:    []*x509.Certificate{rootCert},
+		AKCARootCertificates:  []*x509.Certificate{rootCert},
 		RequiredFormats:       []AttestationFormat{AttestationFormatTPM},
 	}
 

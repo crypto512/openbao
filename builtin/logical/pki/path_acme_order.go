@@ -4,6 +4,7 @@
 package pki
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -385,6 +386,26 @@ func validateCsrMatchesOrder(csr *x509.CertificateRequest, order *acmeOrder) err
 	// don't require DNS/IP identifiers in the order itself. The DNS names come from
 	// the CSR's SubjectAltName field and are bound to the device via attestation.
 	if hasDeviceAttestationIdentifier {
+		// Per draft-acme-device-attest-07 Section 5, the server MUST verify that
+		// the CSR contains the public key attested in the attestation statement
+		if order.AttestedPublicKeyDER != "" {
+			attestedPubKeyDER, err := base64.RawURLEncoding.DecodeString(order.AttestedPublicKeyDER)
+			if err != nil {
+				return fmt.Errorf("%w: failed to decode attested public key: %v", ErrServerInternal, err)
+			}
+
+			// Marshal CSR public key to DER for comparison
+			csrPubKeyDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+			if err != nil {
+				return fmt.Errorf("%w: failed to marshal CSR public key: %v", ErrBadCSR, err)
+			}
+
+			// Compare the public keys (DER-encoded)
+			if !bytes.Equal(attestedPubKeyDER, csrPubKeyDER) {
+				return fmt.Errorf("%w: CSR public key does not match attested public key from device attestation", ErrBadCSR)
+			}
+		}
+
 		// For device attestation orders, we only require that the CSR has valid identifiers
 		// We don't enforce that they match order identifiers since the order only has permanent-identifier
 		if len(csrDNSIdentifiers) == 0 && len(csrIPIdentifiers) == 0 {
@@ -506,6 +527,10 @@ func extractAttestationDataFromOrder(ac *acmeContext, uc *jwsCtx, order *acmeOrd
 				}
 				if format, ok := challenge.ChallengeFields["attestationFormat"].(string); ok && format != "" {
 					order.AttestationFormat = format
+				}
+				// Extract attested public key for CSR validation
+				if pubKeyDER, ok := challenge.ChallengeFields["attestedPublicKeyDER"].(string); ok && pubKeyDER != "" {
+					order.AttestedPublicKeyDER = pubKeyDER
 				}
 				// Found attestation data, no need to check other challenges
 				return nil
@@ -663,12 +688,15 @@ func issueCertFromCsr(ac *acmeContext, csr *x509.CertificateRequest, order *acme
 
 	// We only allow ServerAuth key usage from ACME issued certs
 	// when configuration does not allow usage of ExtKeyusage field.
+	// Exception: roles with device attestation enabled preserve their configured EKU,
+	// as device attestation certificates serve different purposes (VPN clients, IoT devices)
+	// rather than web server authentication.
 	config, err := ac.sc.Backend.acmeState.getConfigWithUpdate(ac.sc)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to fetch ACME configuration: %w", err)
 	}
 
-	if !config.AllowRoleExtKeyUsage {
+	if !config.AllowRoleExtKeyUsage && !ac.role.AllowDeviceAttestation {
 		for _, usage := range parsedBundle.Certificate.ExtKeyUsage {
 			if usage != x509.ExtKeyUsageServerAuth {
 				return nil, "", fmt.Errorf("%w: ACME certs only allow ServerAuth key usage", ErrBadCSR)
@@ -967,14 +995,6 @@ func generateAuthorization(acct *acmeAccount, identifier *ACMEIdentifier, roleNa
 		}
 
 		challenges = append(challenges, challenge)
-	}
-
-	// Debug logging
-	if len(challenges) == 0 {
-		fmt.Printf("WARNING: generateAuthorization created 0 challenges for identifier type=%s, value=%s\n", identifier.Type, identifier.Value)
-		fmt.Printf("  allowedChallenges had %d types\n", len(allowedChallenges))
-	} else {
-		fmt.Printf("DEBUG: generateAuthorization created %d challenges for identifier type=%s\n", len(challenges), identifier.Type)
 	}
 
 	return &ACMEAuthorization{

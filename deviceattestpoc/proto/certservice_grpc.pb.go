@@ -24,32 +24,24 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	CertificateService_RequestCertificate_FullMethodName = "/certservice.CertificateService/RequestCertificate"
 	CertificateService_SubmitAttestation_FullMethodName  = "/certservice.CertificateService/SubmitAttestation"
+	CertificateService_FinalizeOrder_FullMethodName      = "/certservice.CertificateService/FinalizeOrder"
 	CertificateService_GetCertificate_FullMethodName     = "/certservice.CertificateService/GetCertificate"
 	CertificateService_EnrollTPM_FullMethodName          = "/certservice.CertificateService/EnrollTPM"
-	CertificateService_ProvisionAIK_FullMethodName       = "/certservice.CertificateService/ProvisionAIK"
+	CertificateService_ProvisionLAK_FullMethodName       = "/certservice.CertificateService/ProvisionLAK"
+	CertificateService_ActivateCredential_FullMethodName = "/certservice.CertificateService/ActivateCredential"
 )
 
 // CertificateServiceClient is the client API for CertificateService service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// CertificateService provides certificate issuance with TPM device attestation
 type CertificateServiceClient interface {
-	// RequestCertificate initiates a certificate request and returns the device attestation challenge
 	RequestCertificate(ctx context.Context, in *CertRequest, opts ...grpc.CallOption) (*CertResponse, error)
-	// SubmitAttestation submits the TPM attestation response for validation
 	SubmitAttestation(ctx context.Context, in *AttestationSubmit, opts ...grpc.CallOption) (*CertResponse, error)
-	// GetCertificate retrieves the issued certificate if ready
+	FinalizeOrder(ctx context.Context, in *FinalizeRequest, opts ...grpc.CallOption) (*CertResponse, error)
 	GetCertificate(ctx context.Context, in *GetCertRequest, opts ...grpc.CallOption) (*CertResponse, error)
-	// EnrollTPM enrolls a TPM device by configuring its root CA and identifier
-	// WARNING: This is a PoC-only endpoint. In production, enrollment MUST be
-	// performed by administrators through secure out-of-band channels, NOT by clients.
 	EnrollTPM(ctx context.Context, in *TPMEnrollmentRequest, opts ...grpc.CallOption) (*EnrollmentResponse, error)
-	// ProvisionAIK issues an IAK certificate for a TPM attestation key (AK mode)
-	// This endpoint acts as a Privacy CA, issuing IAK certificates for TPMs that lack
-	// manufacturer-provisioned IAK certificates. The AK is created by the client using
-	// go-attestation NewAK(), and OpenBao signs it after validating the enrolled EK.
-	ProvisionAIK(ctx context.Context, in *ProvisionAIKRequest, opts ...grpc.CallOption) (*ProvisionAIKResponse, error)
+	ProvisionLAK(ctx context.Context, in *ProvisionLAKRequest, opts ...grpc.CallOption) (*ProvisionLAKResponse, error)
+	ActivateCredential(ctx context.Context, in *ActivateCredentialRequest, opts ...grpc.CallOption) (*ActivateCredentialResponse, error)
 }
 
 type certificateServiceClient struct {
@@ -80,6 +72,16 @@ func (c *certificateServiceClient) SubmitAttestation(ctx context.Context, in *At
 	return out, nil
 }
 
+func (c *certificateServiceClient) FinalizeOrder(ctx context.Context, in *FinalizeRequest, opts ...grpc.CallOption) (*CertResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CertResponse)
+	err := c.cc.Invoke(ctx, CertificateService_FinalizeOrder_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *certificateServiceClient) GetCertificate(ctx context.Context, in *GetCertRequest, opts ...grpc.CallOption) (*CertResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CertResponse)
@@ -100,10 +102,20 @@ func (c *certificateServiceClient) EnrollTPM(ctx context.Context, in *TPMEnrollm
 	return out, nil
 }
 
-func (c *certificateServiceClient) ProvisionAIK(ctx context.Context, in *ProvisionAIKRequest, opts ...grpc.CallOption) (*ProvisionAIKResponse, error) {
+func (c *certificateServiceClient) ProvisionLAK(ctx context.Context, in *ProvisionLAKRequest, opts ...grpc.CallOption) (*ProvisionLAKResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ProvisionAIKResponse)
-	err := c.cc.Invoke(ctx, CertificateService_ProvisionAIK_FullMethodName, in, out, cOpts...)
+	out := new(ProvisionLAKResponse)
+	err := c.cc.Invoke(ctx, CertificateService_ProvisionLAK_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *certificateServiceClient) ActivateCredential(ctx context.Context, in *ActivateCredentialRequest, opts ...grpc.CallOption) (*ActivateCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActivateCredentialResponse)
+	err := c.cc.Invoke(ctx, CertificateService_ActivateCredential_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -113,24 +125,14 @@ func (c *certificateServiceClient) ProvisionAIK(ctx context.Context, in *Provisi
 // CertificateServiceServer is the server API for CertificateService service.
 // All implementations must embed UnimplementedCertificateServiceServer
 // for forward compatibility.
-//
-// CertificateService provides certificate issuance with TPM device attestation
 type CertificateServiceServer interface {
-	// RequestCertificate initiates a certificate request and returns the device attestation challenge
 	RequestCertificate(context.Context, *CertRequest) (*CertResponse, error)
-	// SubmitAttestation submits the TPM attestation response for validation
 	SubmitAttestation(context.Context, *AttestationSubmit) (*CertResponse, error)
-	// GetCertificate retrieves the issued certificate if ready
+	FinalizeOrder(context.Context, *FinalizeRequest) (*CertResponse, error)
 	GetCertificate(context.Context, *GetCertRequest) (*CertResponse, error)
-	// EnrollTPM enrolls a TPM device by configuring its root CA and identifier
-	// WARNING: This is a PoC-only endpoint. In production, enrollment MUST be
-	// performed by administrators through secure out-of-band channels, NOT by clients.
 	EnrollTPM(context.Context, *TPMEnrollmentRequest) (*EnrollmentResponse, error)
-	// ProvisionAIK issues an IAK certificate for a TPM attestation key (AK mode)
-	// This endpoint acts as a Privacy CA, issuing IAK certificates for TPMs that lack
-	// manufacturer-provisioned IAK certificates. The AK is created by the client using
-	// go-attestation NewAK(), and OpenBao signs it after validating the enrolled EK.
-	ProvisionAIK(context.Context, *ProvisionAIKRequest) (*ProvisionAIKResponse, error)
+	ProvisionLAK(context.Context, *ProvisionLAKRequest) (*ProvisionLAKResponse, error)
+	ActivateCredential(context.Context, *ActivateCredentialRequest) (*ActivateCredentialResponse, error)
 	mustEmbedUnimplementedCertificateServiceServer()
 }
 
@@ -147,14 +149,20 @@ func (UnimplementedCertificateServiceServer) RequestCertificate(context.Context,
 func (UnimplementedCertificateServiceServer) SubmitAttestation(context.Context, *AttestationSubmit) (*CertResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitAttestation not implemented")
 }
+func (UnimplementedCertificateServiceServer) FinalizeOrder(context.Context, *FinalizeRequest) (*CertResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FinalizeOrder not implemented")
+}
 func (UnimplementedCertificateServiceServer) GetCertificate(context.Context, *GetCertRequest) (*CertResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCertificate not implemented")
 }
 func (UnimplementedCertificateServiceServer) EnrollTPM(context.Context, *TPMEnrollmentRequest) (*EnrollmentResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method EnrollTPM not implemented")
 }
-func (UnimplementedCertificateServiceServer) ProvisionAIK(context.Context, *ProvisionAIKRequest) (*ProvisionAIKResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ProvisionAIK not implemented")
+func (UnimplementedCertificateServiceServer) ProvisionLAK(context.Context, *ProvisionLAKRequest) (*ProvisionLAKResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ProvisionLAK not implemented")
+}
+func (UnimplementedCertificateServiceServer) ActivateCredential(context.Context, *ActivateCredentialRequest) (*ActivateCredentialResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ActivateCredential not implemented")
 }
 func (UnimplementedCertificateServiceServer) mustEmbedUnimplementedCertificateServiceServer() {}
 func (UnimplementedCertificateServiceServer) testEmbeddedByValue()                            {}
@@ -213,6 +221,24 @@ func _CertificateService_SubmitAttestation_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CertificateService_FinalizeOrder_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FinalizeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CertificateServiceServer).FinalizeOrder(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CertificateService_FinalizeOrder_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CertificateServiceServer).FinalizeOrder(ctx, req.(*FinalizeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _CertificateService_GetCertificate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetCertRequest)
 	if err := dec(in); err != nil {
@@ -249,20 +275,38 @@ func _CertificateService_EnrollTPM_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
-func _CertificateService_ProvisionAIK_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ProvisionAIKRequest)
+func _CertificateService_ProvisionLAK_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProvisionLAKRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(CertificateServiceServer).ProvisionAIK(ctx, in)
+		return srv.(CertificateServiceServer).ProvisionLAK(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: CertificateService_ProvisionAIK_FullMethodName,
+		FullMethod: CertificateService_ProvisionLAK_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(CertificateServiceServer).ProvisionAIK(ctx, req.(*ProvisionAIKRequest))
+		return srv.(CertificateServiceServer).ProvisionLAK(ctx, req.(*ProvisionLAKRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CertificateService_ActivateCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActivateCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CertificateServiceServer).ActivateCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CertificateService_ActivateCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CertificateServiceServer).ActivateCredential(ctx, req.(*ActivateCredentialRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -283,6 +327,10 @@ var CertificateService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CertificateService_SubmitAttestation_Handler,
 		},
 		{
+			MethodName: "FinalizeOrder",
+			Handler:    _CertificateService_FinalizeOrder_Handler,
+		},
+		{
 			MethodName: "GetCertificate",
 			Handler:    _CertificateService_GetCertificate_Handler,
 		},
@@ -291,8 +339,12 @@ var CertificateService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CertificateService_EnrollTPM_Handler,
 		},
 		{
-			MethodName: "ProvisionAIK",
-			Handler:    _CertificateService_ProvisionAIK_Handler,
+			MethodName: "ProvisionLAK",
+			Handler:    _CertificateService_ProvisionLAK_Handler,
+		},
+		{
+			MethodName: "ActivateCredential",
+			Handler:    _CertificateService_ActivateCredential_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

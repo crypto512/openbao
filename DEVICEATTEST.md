@@ -21,7 +21,7 @@ ACME Device Attestation extends the standard ACME protocol to enable certificate
 | **Identifier Types** | `dns`, `ip` | `permanent-identifier`, `hardware-module` |
 | **Challenge Response** | Empty JSON object `{}` | WebAuthn attestation object (CBOR-encoded) |
 | **Certificate Binding** | Domain names | Device hardware identifiers |
-| **Trust Anchor** | CA validates domain control | CA validates manufacturer certificate chain |
+| **Trust Anchor** | CA validates domain control | CA validates AIK certificate chain |
 
 ## Protocol Flow
 
@@ -61,7 +61,7 @@ ACME Device Attestation extends the standard ACME protocol to enable certificate
        ├──┐                                                      │
        │  │ • Construct key authorization                        │
        │  │ • Hash with SHA-256                                  │
-       │  │ • Call TPM2_Certify with hash                        │
+       │  │ • Call TPM2_Certify with hash as extraData           │
        │  │ • Build attestation object (CBOR)                    │
        │<─┘                                                      │
        │                                                         │
@@ -131,7 +131,7 @@ ACME Device Attestation extends the standard ACME protocol to enable certificate
 │  │ 2. Validate AIK Certificate Chain                        │  │
 │  │    • x5c[0]: AIK certificate                             │  │
 │  │    • x5c[1..n]: Intermediate CAs                         │  │
-│  │    • Chain to configured EK root CA                      │  │
+│  │    • Chain to configured AK CA root                      │  │
 │  │    • Check expiration and revocation                     │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                              │                                 │
@@ -161,18 +161,17 @@ ACME Device Attestation extends the standard ACME protocol to enable certificate
 │                              │                                 │
 │                              ▼                                 │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │ 6. Extract Permanent Identifier                          │  │
-│  │    • Parse AIK certificate SAN extension                 │  │
-│  │    • OID 1.3.6.1.5.5.7.8.3 (permanentIdentifier)         │  │
-│  │    • OID 1.3.6.1.5.5.7.8.4 (hardwareModuleName)          │  │
+│  │ 6. Verify Attested Public Key Name                       │  │
+│  │    • Compute TPM Name = nameAlg || Hash(pubArea)         │  │
+│  │    • Compare with TPMS_CERTIFY_INFO.Name                 │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                              │                                 │
 │                              ▼                                 │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │ 7. Policy Enforcement                                    │  │
-│  │    • Check allowed/blocked identifier lists              │  │
-│  │    • Verify attestation policy OIDs                      │  │
-│  │    • Validate against role settings                      │  │
+│  │ 7. Extract Permanent Identifier                          │  │
+│  │    • Parse AIK certificate SAN extension                 │  │
+│  │    • OID 1.3.6.1.5.5.7.8.3 (permanentIdentifier)         │  │
+│  │    • Or URI SAN with urn:permanent-identifier: prefix    │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                              │                                 │
 │                              ▼                                 │
@@ -196,9 +195,9 @@ Configure device attestation settings at the PKI mount level.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable device attestation globally |
-| `validate_ek_certificate` | bool | `true` | Validate TPM EK certificate chains |
+| `validate_ek_certificate` | bool | `true` | Validate AIK certificate chains against configured AK CA roots |
 | `default_attestation_policies` | []string | `[]` | Default policy OIDs required in certificates |
-| `allowed_attestation_formats` | []string | `["tpm"]` | Allowed attestation formats |
+| `allowed_attestation_formats` | []string | `["tpm"]` | Allowed attestation formats: `tpm`, `android-key`, `apple`, `chromeos` |
 
 **Request Example**:
 
@@ -233,16 +232,18 @@ curl https://bao.example.com/v1/pki/config/attestation \
 }
 ```
 
-### EK Root Certificate Management
+### AK CA Root Certificate Management
 
-Manage trusted TPM manufacturer root CA certificates.
+Manage trusted Attestation Key (AK) CA root certificates. These certificates are used to validate AIK certificate chains in TPM attestation statements.
 
-#### List EK Roots
+**Note**: In a typical deployment, a Privacy CA issues AIK/LAK certificates to devices. The Privacy CA's root certificate must be configured here for OpenBao to validate device attestations.
 
-**Endpoint**: `LIST /v1/pki/config/acme/ek-roots`
+#### List AK CA Roots
+
+**Endpoint**: `LIST /v1/pki/config/acme/ak-ca-roots`
 
 ```bash
-curl -X LIST https://bao.example.com/v1/pki/config/acme/ek-roots \
+curl -X LIST https://bao.example.com/v1/pki/config/acme/ak-ca-roots \
   -H "X-Vault-Token: $TOKEN"
 ```
 
@@ -250,28 +251,28 @@ curl -X LIST https://bao.example.com/v1/pki/config/acme/ek-roots \
 ```json
 {
   "data": {
-    "keys": ["intel-tpm-root", "infineon-ecc", "infineon-rsa", "stm"]
+    "keys": ["privacy-ca", "openbao-ak", "enterprise-ca"]
   }
 }
 ```
 
-#### Add EK Root Certificate
+#### Add AK CA Root Certificate
 
-**Endpoint**: `POST /v1/pki/config/acme/ek-roots/{name}`
+**Endpoint**: `POST /v1/pki/config/acme/ak-ca-roots/{name}`
 
 **Parameters**:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | Yes | Identifier for this root CA |
-| `certificate` | string | Yes | PEM-encoded X.509 root CA certificate |
+| `certificate` | string | Yes | PEM-encoded X.509 CA certificate |
 
 ```bash
-curl -X POST https://bao.example.com/v1/pki/config/acme/ek-roots/intel-tpm-root \
+curl -X POST https://bao.example.com/v1/pki/config/acme/ak-ca-roots/privacy-ca \
   -H "X-Vault-Token: $TOKEN" \
   -d @- <<EOF
 {
-  "name": "intel-tpm-root",
+  "name": "privacy-ca",
   "certificate": "-----BEGIN CERTIFICATE-----\nMIIEnjCCA4agAwIBAgIUGQ...\n-----END CERTIFICATE-----"
 }
 EOF
@@ -281,17 +282,17 @@ EOF
 ```json
 {
   "data": {
-    "name": "intel-tpm-root"
+    "name": "privacy-ca"
   }
 }
 ```
 
-#### Read EK Root Certificate
+#### Read AK CA Root Certificate
 
-**Endpoint**: `GET /v1/pki/config/acme/ek-roots/{name}`
+**Endpoint**: `GET /v1/pki/config/acme/ak-ca-roots/{name}`
 
 ```bash
-curl https://bao.example.com/v1/pki/config/acme/ek-roots/intel-tpm-root \
+curl https://bao.example.com/v1/pki/config/acme/ak-ca-roots/privacy-ca \
   -H "X-Vault-Token: $TOKEN"
 ```
 
@@ -299,18 +300,18 @@ curl https://bao.example.com/v1/pki/config/acme/ek-roots/intel-tpm-root \
 ```json
 {
   "data": {
-    "name": "intel-tpm-root",
+    "name": "privacy-ca",
     "certificate": "-----BEGIN CERTIFICATE-----\n..."
   }
 }
 ```
 
-#### Delete EK Root Certificate
+#### Delete AK CA Root Certificate
 
-**Endpoint**: `DELETE /v1/pki/config/acme/ek-roots/{name}`
+**Endpoint**: `DELETE /v1/pki/config/acme/ak-ca-roots/{name}`
 
 ```bash
-curl -X DELETE https://bao.example.com/v1/pki/config/acme/ek-roots/intel-tpm-root \
+curl -X DELETE https://bao.example.com/v1/pki/config/acme/ak-ca-roots/privacy-ca \
   -H "X-Vault-Token: $TOKEN"
 ```
 
@@ -327,13 +328,9 @@ Configure PKI roles to support device attestation.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `allow_device_attestation` | bool | `false` | Enable device attestation for this role |
-| `validate_ek_certificate` | bool | inherited | Override global EK validation setting |
-| `required_attestation_formats` | []string | inherited | Required attestation formats (e.g., `["tpm"]`) |
+| `validate_ek_certificate` | bool | `true` | Validate AIK certificate chain (override global setting) |
+| `required_attestation_formats` | []string | `[]` | Required attestation formats (empty = inherit from global) |
 | `attestation_policies` | []string | `[]` | Required certificate policy OIDs |
-| `allowed_tpm_identifiers` | []string | `[]` | Whitelist of permanent identifiers (empty = allow all) |
-| `blocked_tpm_identifiers` | []string | `[]` | Blacklist of permanent identifiers |
-| `allow_permanent_identifier_sans` | bool | `false` | Include permanent identifier in certificate SAN |
-| `allow_hardware_module_name_sans` | bool | `false` | Include hardware module name in certificate SAN |
 
 **Request Example**:
 
@@ -346,7 +343,6 @@ curl -X POST https://bao.example.com/v1/pki/roles/ipsec-vpn \
   "required_attestation_formats": ["tpm"],
   "validate_ek_certificate": true,
   "attestation_policies": ["2.23.133.8.1"],
-  "allow_permanent_identifier_sans": true,
   "allowed_domains": ["vpn.example.com"],
   "allow_subdomains": true,
   "ttl": "8760h",
@@ -384,7 +380,7 @@ curl https://bao.example.com/v1/pki/acme/ipsec-vpn/directory
 
 **Identifier Types**:
 
-- `permanent-identifier`: Device-specific permanent identifier from TPM
+- `permanent-identifier`: Device-specific permanent identifier extracted from AIK certificate
 - `hardware-module`: Hardware security module identifier
 
 **Request Example**:
@@ -508,6 +504,8 @@ Attestation Object (CBOR):
 
 **Endpoint**: `POST /v1/pki/acme/{role}/order/{order-id}/finalize`
 
+Per draft-acme-device-attest-07 Section 5, the server verifies that the CSR contains the public key attested in the attestation statement (from `pubArea`).
+
 **Decoded Payload**:
 ```json
 {
@@ -547,7 +545,7 @@ MIIDXTCCAkWgAwIBAgIUFEzU9z7F7N3J3k7vX...
 | `ver` | string | TPM version ("2.0") |
 | `alg` | int | COSE algorithm identifier (-257 for RS256) |
 | `x5c` | [][]byte | AIK certificate chain (DER-encoded) |
-| `sig` | []byte | TPM signature over certInfo |
+| `sig` | []byte | TPM signature over certInfo (TPMT_SIGNATURE) |
 | `certInfo` | []byte | TPMS_ATTEST structure |
 | `pubArea` | []byte | TPMT_PUBLIC structure |
 
@@ -561,7 +559,7 @@ MIIDXTCCAkWgAwIBAgIUFEzU9z7F7N3J3k7vX...
 
 ### TPMS_ATTEST Structure
 
-The `certInfo` field contains a TPM 2.0 attestation structure:
+The `certInfo` field contains a TPM 2.0 attestation structure (TPM 2.0 Part 2, Section 10.12.8):
 
 | Field | Value | Description |
 |-------|-------|-------------|
@@ -573,15 +571,40 @@ The `certInfo` field contains a TPM 2.0 attestation structure:
 | `firmwareVersion` | uint64 | TPM firmware version |
 | `attested` | TPMS_CERTIFY_INFO | Attested key information |
 
-The `extraData` field **must** contain the SHA-256 hash of the ACME key authorization string.
+The `extraData` field **MUST** contain the SHA-256 hash of the ACME key authorization string.
+
+### TPMT_PUBLIC Structure
+
+The `pubArea` field contains the public key structure (TPM 2.0 Part 2, Section 12.2.4):
+
+| Field | Description |
+|-------|-------------|
+| `type` | Key algorithm (TPM_ALG_RSA, TPM_ALG_ECDSA) |
+| `nameAlg` | Hash algorithm for computing Name (TPM_ALG_SHA256) |
+| `objectAttributes` | TPMA_OBJECT flags (FixedTPM, FixedParent, etc.) |
+| `authPolicy` | Authorization policy digest |
+| `parameters` | Algorithm-specific parameters |
+| `unique` | Public key material |
+
+The TPM Name is computed as: `nameAlg || Hash(pubArea)` and must match `TPMS_CERTIFY_INFO.Name`.
+
+### TPMT_SIGNATURE Structure
+
+Per draft-acme-device-attest-07 Section 5.1, the `sig` field contains a TPMT_SIGNATURE:
+
+| Signature Algorithm | Format |
+|---------------------|--------|
+| RSASSA (0x0014) | hashAlg (2B) + TPM2B_PUBLIC_KEY_RSA |
+| RSAPSS (0x0016) | hashAlg (2B) + TPM2B_PUBLIC_KEY_RSA |
+| ECDSA (0x0018) | hashAlg (2B) + TPM2B r + TPM2B s |
 
 ## Certificate Extensions
 
-When device attestation is used and enabled in the role, issued certificates include special SAN extensions.
+When device attestation is used, issued certificates include special SAN extensions.
 
 ### Permanent Identifier Extension
 
-**OID**: `1.3.6.1.5.5.7.8.3` (id-on-permanentIdentifier)
+**OID**: `1.3.6.1.5.5.7.8.3` (id-on-permanentIdentifier per RFC 4043)
 
 Appears in certificate Subject Alternative Name as:
 
@@ -591,9 +614,15 @@ X509v3 Subject Alternative Name:
     othername: 1.3.6.1.5.5.7.8.3 :: UTF8String: PID:device-12345
 ```
 
+Alternative URI format (used by LAK certificates):
+```
+X509v3 Subject Alternative Name:
+    URI:urn:permanent-identifier:A3B2C1D4E5F6...
+```
+
 ### Hardware Module Name Extension
 
-**OID**: `1.3.6.1.5.5.7.8.4` (id-on-hardwareModuleName)
+**OID**: `1.3.6.1.5.5.7.8.4` (id-on-hardwareModuleName per RFC 4108)
 
 Appears in certificate Subject Alternative Name as:
 
@@ -605,14 +634,6 @@ X509v3 Subject Alternative Name:
         hwSerialNum: OCTET STRING 'TPM:manufacturer=IFX,model=SLB9665'
 ```
 
-## TPM Manufacturer Root CAs
-
-Configure trusted manufacturer root CA certificates for validating TPM endorsement key certificates.
-
-### Microsoft provide a package with all TPM manufacturer CA
-
-https://go.microsoft.com/fwlink/?linkid=2097925
-
 ## Security Model
 
 ### Trust Architecture
@@ -622,21 +643,22 @@ https://go.microsoft.com/fwlink/?linkid=2097925
 │                    Trust Hierarchy                          │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  TPM Manufacturer Root CA (trusted by OpenBao)              │
+│  AK CA Root (Privacy CA)                                    │
+│  • Configured in OpenBao via /config/acme/ak-ca-roots       │
+│  • Issues AIK/LAK certificates to devices                   │
 │              │                                              │
-│              ├─ Intermediate CA                             │
+│              ├─ Intermediate CA (optional)                  │
 │              │        │                                     │
-│              │        └─ AIK Certificate                    │
+│              │        └─ AIK Certificate (LAK)              │
 │              │                  │                           │
-│              │                  │ certifies                 │
+│              │                  │ certifies via TPM2_Certify│
 │              │                  ▼                           │
 │              │           Device Key                         │
 │              │           (in TPM, non-exportable)           │
 │              │                                              │
-│  Endorsement Key (EK)                                       │
-│  • Factory-provisioned by manufacturer                      │
-│  • Identifies specific TPM hardware                         │
-│  • Used to validate AIK authenticity                        │
+│  Endorsement Key (EK) - Manufacturer-provisioned            │
+│  • Used during LAK provisioning (credential activation)     │
+│  • Proves TPM authenticity to Privacy CA                    │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -646,7 +668,7 @@ https://go.microsoft.com/fwlink/?linkid=2097925
 OpenBao performs comprehensive validation:
 
 1. **Certificate Chain Validation**
-   - AIK certificate must chain to a configured manufacturer root CA
+   - AIK certificate must chain to a configured AK CA root certificate
    - All certificates must be within validity period
    - Certificate key usage must be appropriate
 
@@ -655,52 +677,53 @@ OpenBao performs comprehensive validation:
    - Key authorization hash must match extraData in attestation
    - TPMS_ATTEST magic value must be correct (0xff544347)
 
-3. **Policy Enforcement**
-   - Permanent identifier allowlist/blocklist checks
-   - Certificate policy OID validation
-   - Attestation format restrictions per role
+3. **Public Key Binding**
+   - Computed TPM Name of pubArea must match TPMS_CERTIFY_INFO.Name
+   - CSR public key must match attested public key from pubArea
 
 4. **Replay Prevention**
    - Each challenge has a unique token
    - Key authorization binds challenge to specific ACME account
    - Attestation validated only once per challenge
 
+### ACME Error Types
+
+Device attestation defines specific error types per draft-acme-device-attest-07:
+
+| Error Type | HTTP Status | Description |
+|------------|-------------|-------------|
+| `badAttestationStatement` | 400 | The attestation statement is malformed or invalid |
+| `unsupportedAttestationFormat` | 501 | The attestation format is not supported |
+| `rejectedAttestationFormat` | 403 | The attestation format is not allowed by policy |
+| `attestationVerificationFailed` | 403 | The attestation statement verification failed |
+
 ### Security Best Practices
 
-#### 1. Configure EK Root Certificates
+#### 1. Configure AK CA Root Certificates
 
-Only trust manufacturer CAs from official sources:
+Only trust Privacy CA certificates from authorized sources:
 
 ```bash
 # Verify certificate fingerprints
-openssl x509 -in Intel_TPM_RootCA.pem -noout -fingerprint -sha256
+openssl x509 -in privacy-ca-root.pem -noout -fingerprint -sha256
 
-# Compare with published fingerprints before installing
-bao write pki/config/acme/ek-roots/intel \
-  name=intel \
-  certificate=@Intel_TPM_RootCA.pem
+# Configure in OpenBao
+bao write pki/config/acme/ak-ca-roots/privacy-ca \
+  name=privacy-ca \
+  certificate=@privacy-ca-root.pem
 ```
 
-#### 2. Use Identifier Allowlists
-
-Restrict which devices can obtain certificates:
-
-```bash
-bao write pki/roles/ipsec-vpn \
-  allow_device_attestation=true \
-  allowed_tpm_identifiers="PID:laptop-001,PID:laptop-002,PID:laptop-003"
-```
-
-#### 3. Enable EK Certificate Validation
+#### 2. Enable AIK Certificate Validation
 
 Always validate in production:
 
 ```bash
 bao write pki/config/attestation \
+  enabled=true \
   validate_ek_certificate=true
 ```
 
-#### 4. Require Attestation Policies
+#### 3. Require Attestation Policies
 
 Enforce enterprise TPM policies:
 
@@ -713,7 +736,7 @@ Common TCG policy OIDs:
 - `2.23.133.8.1` - TCG TPM Attestation
 - `2.23.133.8.3` - TCG TPM Endorsement
 
-#### 5. Limit Certificate Validity
+#### 4. Limit Certificate Validity
 
 Use short TTLs and enable rotation:
 
@@ -721,15 +744,6 @@ Use short TTLs and enable rotation:
 bao write pki/roles/ipsec-vpn \
   ttl=720h \      # 30 days
   max_ttl=8760h   # 1 year
-```
-
-#### 6. Block Compromised Devices
-
-Maintain a blocklist:
-
-```bash
-bao write pki/roles/ipsec-vpn \
-  blocked_tpm_identifiers="PID:compromised-device-123"
 ```
 
 ### Threat Model
@@ -761,22 +775,22 @@ bao write pki/config/attestation \
   allowed_attestation_formats=tpm
 ```
 
-### Step 2: Configure Manufacturer Root CAs
+### Step 2: Configure AK CA Root Certificates
 
 ```bash
-# Add Intel TPM root
-bao write pki/config/acme/ek-roots/intel \
-  name=intel \
-  certificate=@intel_tpm_root.pem
+# Add Privacy CA root certificate
+bao write pki/config/acme/ak-ca-roots/privacy-ca \
+  name=privacy-ca \
+  certificate=@privacy-ca-root.pem
 
-# Add Infineon TPM roots
-bao write pki/config/acme/ek-roots/infineon-ecc \
-  name=infineon-ecc \
-  certificate=@infineon_ecc_root.pem
+# For dual PKI setups (Privacy CA is another OpenBao mount)
+# Export AK CA root from /pki-ak mount
+bao read -field=certificate pki-ak/cert/ca > ak-ca-root.pem
 
-bao write pki/config/acme/ek-roots/infineon-rsa \
-  name=infineon-rsa \
-  certificate=@infineon_rsa_root.pem
+# Configure /pki-vpn to trust the AK CA
+bao write pki-vpn/config/acme/ak-ca-roots/openbao-ak \
+  name=openbao-ak \
+  certificate=@ak-ca-root.pem
 ```
 
 ### Step 3: Create Role for Device Certificates
@@ -786,35 +800,37 @@ bao write pki/roles/ipsec-vpn \
   allow_device_attestation=true \
   required_attestation_formats=tpm \
   validate_ek_certificate=true \
-  allow_permanent_identifier_sans=true \
   allowed_domains="vpn.example.com" \
   allow_subdomains=true \
   ttl=720h \
   max_ttl=8760h
 ```
 
-### Step 4: Verify Configuration
+### Step 4: Enable ACME
+
+```bash
+bao write pki/config/cluster \
+  path="https://bao.example.com/v1/pki" \
+  aia_path="https://bao.example.com/v1/pki"
+
+bao write pki/config/acme \
+  enabled=true \
+  allowed_issuers="*" \
+  allowed_roles="*"
+```
+
+### Step 5: Verify Configuration
 
 ```bash
 # Check attestation config
 bao read pki/config/attestation
 
-# List EK roots
-bao list pki/config/acme/ek-roots
+# List AK CA roots
+bao list pki/config/acme/ak-ca-roots
 
 # Verify role
 bao read pki/roles/ipsec-vpn
 ```
-
-### Step 5: Device Enrollment
-
-Devices can now use ACME with device attestation:
-
-1. Create ACME account
-2. Submit order with `permanent-identifier`
-3. Complete `device-attest-01` challenge with TPM attestation
-4. Finalize order with CSR
-5. Download certificate
 
 ## Troubleshooting
 
@@ -842,18 +858,27 @@ bao write pki/roles/ipsec-vpn required_attestation_formats=tpm
 
 **Problem**: "failed to verify AIK certificate chain"
 
-**Solution**: Add manufacturer root CA:
+**Solution**: Add AK CA root certificate:
 ```bash
-bao write pki/config/acme/ek-roots/manufacturer \
-  name=manufacturer \
-  certificate=@manufacturer_root.pem
+bao write pki/config/acme/ak-ca-roots/my-ca \
+  name=my-ca \
+  certificate=@my-ca-root.pem
 ```
 
 ---
 
-**Problem**: "permanent identifier not found in AIK certificate"
+**Problem**: "AIK certificate validation is enabled but no trusted AK CA roots are configured"
 
-**Solution**: AIK certificate must include SAN with OID 1.3.6.1.5.5.7.8.3
+**Solution**: Configure at least one AK CA root certificate.
+
+---
+
+**Problem**: "permanent identifier not found in certificate"
+
+**Solution**: AIK certificate must include either:
+- SAN with OID 1.3.6.1.5.5.7.8.3 (permanentIdentifier)
+- URI SAN with `urn:permanent-identifier:` prefix
+- Subject DN serialNumber field
 
 ### Attestation Validation Issues
 
@@ -862,17 +887,22 @@ bao write pki/config/acme/ek-roots/manufacturer \
 **Solution**: Client must:
 1. Construct key authorization: `token + "." + thumbprint`
 2. Compute SHA-256 hash
-3. Use hash as qualifying data in TPM2_Certify
+3. Use hash as extraData in TPM2_Certify
 
 ---
 
-**Problem**: "TPM permanent identifier is blocked"
+**Problem**: "certified object name mismatch"
 
-**Solution**: Remove from blocklist:
-```bash
-bao write pki/roles/ipsec-vpn \
-  blocked_tpm_identifiers=""
-```
+**Solution**: Verify that:
+1. pubArea contains the correct public key
+2. TPM2_Certify was called on the correct key
+3. pubArea bytes match what was certified
+
+---
+
+**Problem**: "invalid magic value"
+
+**Solution**: The certInfo must start with TPM_GENERATED_VALUE (0xff544347). Ensure using real TPM-generated attestation, not simulated data.
 
 ### Policy Issues
 
@@ -894,16 +924,41 @@ bao write pki/roles/ipsec-vpn \
   allow_device_attestation=true
 ```
 
+## Implementation Files
+
+The device attestation implementation consists of the following files in `builtin/logical/pki/`:
+
+| File | Description |
+|------|-------------|
+| `path_config_attestation.go` | Global attestation configuration endpoint |
+| `path_acme_ak_ca_roots.go` | AK CA root certificate management |
+| `acme_attestation.go` | Core attestation types and validation framework |
+| `acme_attestation_tpm.go` | TPM 2.0 attestation validator |
+| `acme_attestation_aik.go` | AIK certificate chain validation |
+| `tpm_structures.go` | TPM 2.0 structure parsing (TPMS_ATTEST, TPMT_PUBLIC, TPMT_SIGNATURE) |
+| `acme_cert_extensions.go` | Permanent identifier and hardware module name extensions |
+| `acme_challenges.go` | ValidateDeviceAttest01Challenge function |
+| `acme_authorizations.go` | ACMEDeviceAttestChallenge type definition |
+| `acme_errors.go` | Device attestation error types |
+| `path_roles.go` | Role parameters for device attestation |
+
 ## References
 
 - [draft-acme-device-attest-07](https://www.ietf.org/archive/id/draft-acme-device-attest-07.txt) - ACME Device Attestation
 - [RFC 8555](https://www.rfc-editor.org/rfc/rfc8555.html) - ACME Protocol
-- [WebAuthn](https://www.w3.org/TR/webauthn-2/) - Web Authentication (attestation format)
-- [TCG TPM 2.0](https://trustedcomputinggroup.org/resource/tpm-library-specification/) - TPM Specification
+- [WebAuthn TPM Attestation](https://www.w3.org/TR/webauthn-2/#sctn-tpm-attestation) - Attestation format
+- [TCG TPM 2.0 Library](https://trustedcomputinggroup.org/resource/tpm-library-specification/) - TPM Specification
+- [TCG TPM 2.0 Keys for Device Identity](https://trustedcomputinggroup.org/resource/tpm-2-0-keys-for-device-identity-and-attestation/) - LAK provisioning
+- [RFC 4043](https://www.rfc-editor.org/rfc/rfc4043.html) - Permanent Identifier
+- [RFC 4108](https://www.rfc-editor.org/rfc/rfc4108.html) - Hardware Module Name
 - [RFC 5280](https://www.rfc-editor.org/rfc/rfc5280.html) - X.509 Certificate Profile
+
+## Demonstration
+
+A working demonstration of TPM device attestation is available in the `deviceattestpoc/` directory. See `deviceattestpoc/README.md` for setup and usage instructions.
 
 ---
 
-**Document Version**: 1.0
+**Document Version**: 2.0
 **OpenBao Branch**: deviceattest
-**Last Updated**: 2025-01-18
+**Last Updated**: 2025-01-26

@@ -573,5 +573,15 @@ func ValidateDeviceAttest01Challenge(
 		challenge.ChallengeFields["hardwareModuleName"] = result.HardwareModuleName
 	}
 
+	// Store attested public key for CSR validation per draft-acme-device-attest-07 Section 5
+	// The server MUST verify that the CSR contains the public key attested in the attestation statement
+	if result.AttestedPublicKey != nil {
+		pubKeyDER, err := x509.MarshalPKIXPublicKey(result.AttestedPublicKey)
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to marshal attested public key: %w", err)
+		}
+		challenge.ChallengeFields["attestedPublicKeyDER"] = base64.RawURLEncoding.EncodeToString(pubKeyDER)
+	}
+
 	return true, result, nil
 }

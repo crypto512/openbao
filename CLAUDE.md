@@ -384,3 +384,7 @@ Storage is automatically namespaced to your mount's prefix.
 - Validate all user input thoroughly
 - Follow principle of least privilege for capabilities
 - Any missing must from the draft must be implemented.
+- Use go 1.25
+- Never compile manually the full project or openbao from root dir. Use "make build" or other target from deviceattestpoc directory
+- Never put comment or handle compat regarding old code if it is a current development in the local git branch (uncommited).
+- Use 1.25 always and use container build system referenced in @deviceattestpoc/Makefile

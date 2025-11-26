@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"math/big"
+	"net/url"
 	"testing"
 	"time"
 
@@ -159,4 +160,150 @@ func TestEncodePermanentIdentifierExtension(t *testing.T) {
 
 	// Verify the extension value is not empty
 	require.NotEmpty(t, ext.Value)
+}
+
+func TestParsePermanentIdentifierFromCert_URISAN(t *testing.T) {
+	// Create a self-signed certificate with permanent identifier in URI SAN
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	identifier := "sha256-ekpubkey-abcdef123456"
+	uriStr := URNPermanentIdentifierPrefix + identifier
+
+	uri, err := url.Parse(uriStr)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "Test Device",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		URIs:                  []*url.URL{uri},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+
+	// Parse permanent identifier
+	parsedID, err := ParsePermanentIdentifierFromCert(cert)
+	require.NoError(t, err)
+	require.Equal(t, identifier, parsedID)
+}
+
+func TestParsePermanentIdentifierFromCert_URISAN_Priority(t *testing.T) {
+	// Test that Subject.SerialNumber takes priority over URI SAN
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	subjectSerialID := "subject-serial-id"
+	uriIdentifier := "uri-identifier"
+	uriStr := URNPermanentIdentifierPrefix + uriIdentifier
+
+	uri, err := url.Parse(uriStr)
+	require.NoError(t, err)
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName:   "Test Device",
+			SerialNumber: subjectSerialID,
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		URIs:                  []*url.URL{uri},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+
+	// Parse permanent identifier - should return Subject.SerialNumber (higher priority)
+	parsedID, err := ParsePermanentIdentifierFromCert(cert)
+	require.NoError(t, err)
+	require.Equal(t, subjectSerialID, parsedID)
+}
+
+func TestParsePermanentIdentifierFromCert_URISAN_MultipleURIs(t *testing.T) {
+	// Test certificate with multiple URIs, only one has permanent-identifier prefix
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	identifier := "my-permanent-id-xyz"
+
+	uri1, _ := url.Parse("https://example.com/device")
+	uri2, _ := url.Parse(URNPermanentIdentifierPrefix + identifier)
+	uri3, _ := url.Parse("urn:other:something")
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "Test Device",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		URIs:                  []*url.URL{uri1, uri2, uri3},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+
+	// Parse permanent identifier
+	parsedID, err := ParsePermanentIdentifierFromCert(cert)
+	require.NoError(t, err)
+	require.Equal(t, identifier, parsedID)
+}
+
+func TestParsePermanentIdentifierFromCert_URISAN_OtherURNPrefix(t *testing.T) {
+	// Test that other URN prefixes don't match
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	// Use old format which should NOT be recognized
+	uri1, _ := url.Parse("urn:ek:sha256:old-format-id")
+	// Use other URN format
+	uri2, _ := url.Parse("urn:uuid:12345678-1234-1234-1234-123456789abc")
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "Test Device",
+		},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		URIs:                  []*url.URL{uri1, uri2},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	require.NoError(t, err)
+
+	cert, err := x509.ParseCertificate(certDER)
+	require.NoError(t, err)
+
+	// Parse permanent identifier - should fail since no matching format
+	_, err = ParsePermanentIdentifierFromCert(cert)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no permanent identifier found")
+}
+
+func TestURNPermanentIdentifierPrefix(t *testing.T) {
+	// Verify the constant is correct
+	require.Equal(t, "urn:permanent-identifier:", URNPermanentIdentifierPrefix)
 }

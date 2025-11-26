@@ -1,325 +1,358 @@
-
 package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/google/go-attestation/attest"
+	"github.com/google/uuid"
 	pb "github.com/openbao/openbao/deviceattestpoc/proto"
 	"google.golang.org/grpc"
 )
 
-// Server implements the CertificateService gRPC server
 type Server struct {
 	pb.UnimplementedCertificateServiceServer
-	openbaoClient *OpenBaoClient
-	orders        map[string]*OrderInfo // orderID -> order info with CSR
+	openbaoClient      *OpenBaoClient
+	orders             map[string]*OrderInfo
+	trustedEKCAs       map[string]*x509.Certificate
+	allowedEKHashes    map[string]bool
+	activationSessions map[string]*ActivationSession
 }
 
-// OrderInfo stores information about an ACME order including the CSR
+type ActivationSession struct {
+	PermanentID    string
+	AKParameters   []byte
+	EKCertPEM      string
+	ExpectedSecret []byte
+	CreatedAt      time.Time
+}
+
 type OrderInfo struct {
 	Order      *ACMEOrder
 	CSR        string
 	CommonName string
 }
 
-// RequestCertificate initiates a certificate request and returns the device attestation challenge
 func (s *Server) RequestCertificate(ctx context.Context, req *pb.CertRequest) (*pb.CertResponse, error) {
-	log.Printf("Received certificate request for CN=%s, permanentID=%s",
-		req.CommonName, req.PermanentIdentifier)
+	usage := req.Usage
+	if usage == "" {
+		usage = "ipsec-vpn" // Default for backward compatibility
+	}
+	log.Printf("RequestCertificate: CN=%s, permanentID=%s, usage=%s", req.CommonName, req.PermanentIdentifier, usage)
 
-	// Create ACME order with device attestation
-	order, err := s.openbaoClient.CreateACMEOrder(ctx, req)
+	order, err := s.openbaoClient.CreateACMEOrder(ctx, &CertRequest{
+		CommonName:          req.CommonName,
+		SanDNS:              req.SanDns,
+		SanIPs:              req.SanIps,
+		PermanentIdentifier: req.PermanentIdentifier,
+		Usage:               usage,
+	})
 	if err != nil {
-		return &pb.CertResponse{
-			Status: "error",
-			Error:  fmt.Sprintf("Failed to create ACME order: %v", err),
-		}, nil
+		return &pb.CertResponse{Status: "error", Error: err.Error()}, nil
 	}
 
-	log.Printf("Created ACME order: %s, authorization: %s",
-		order.OrderID, order.AuthorizationURL)
-
-	// Store order with CSR for later finalization
 	s.orders[order.OrderID] = &OrderInfo{
 		Order:      order,
-		CSR:        req.CsrPem,
 		CommonName: req.CommonName,
 	}
 
-	// Return challenge information to client
 	return &pb.CertResponse{
-		Status:             "pending",
-		OrderId:            order.OrderID,
-		AuthorizationUrl:   order.AuthorizationURL,
-		ChallengeUrl:       order.ChallengeURL,
-		ChallengeToken:     order.ChallengeToken,
-		AccountThumbprint:  order.AccountThumbprint,
-		Details:            "Device attestation challenge created. Submit attestation object to continue.",
+		Status:            "pending",
+		OrderId:           order.OrderID,
+		AuthorizationUrl:  order.AuthorizationURL,
+		ChallengeUrl:      order.ChallengeURL,
+		ChallengeToken:    order.ChallengeToken,
+		AccountThumbprint: order.AccountThumbprint,
+		FinalizeUrl:       order.FinalizeURL,
 	}, nil
 }
 
-// SubmitAttestation submits the TPM attestation response for validation
 func (s *Server) SubmitAttestation(ctx context.Context, req *pb.AttestationSubmit) (*pb.CertResponse, error) {
-	log.Printf("Received attestation submission for order: %s", req.OrderId)
+	log.Printf("SubmitAttestation: orderID=%s", req.OrderId)
 
-	// Submit attestation to ACME challenge
-	err := s.openbaoClient.SubmitAttestation(ctx, req.ChallengeUrl, req.AttestationObject)
-	if err != nil {
-		return &pb.CertResponse{
-			Status:  "error",
-			OrderId: req.OrderId,
-			Error:   fmt.Sprintf("Failed to submit attestation: %v", err),
-		}, nil
+	// Submit attestation to OpenBao ACME - validation is done by the CA
+	if err := s.openbaoClient.SubmitAttestation(ctx, req.ChallengeUrl, req.AttestationObject); err != nil {
+		return &pb.CertResponse{Status: "error", OrderId: req.OrderId, Error: err.Error()}, nil
 	}
 
-	log.Printf("Attestation submitted successfully for order: %s", req.OrderId)
-
-	// Check order status
 	status, err := s.openbaoClient.GetOrderStatus(ctx, req.OrderId)
 	if err != nil {
-		return &pb.CertResponse{
-			Status:  "error",
-			OrderId: req.OrderId,
-			Error:   fmt.Sprintf("Failed to get order status: %v", err),
-		}, nil
+		return &pb.CertResponse{Status: "error", OrderId: req.OrderId, Error: err.Error()}, nil
 	}
 
-	log.Printf("Order status: %s", status)
-
-	// If order is ready, finalize it with the CSR
-	if status == "ready" {
-		orderInfo, ok := s.orders[req.OrderId]
-		if !ok {
-			return &pb.CertResponse{
-				Status:  "error",
-				OrderId: req.OrderId,
-				Error:   "Order not found in server cache",
-			}, nil
-		}
-
-		log.Printf("Order is ready, finalizing with CSR...")
-		err := s.openbaoClient.FinalizeOrder(ctx, orderInfo.Order.FinalizeURL, orderInfo.CSR)
-		if err != nil {
-			return &pb.CertResponse{
-				Status:  "error",
-				OrderId: req.OrderId,
-				Error:   fmt.Sprintf("Failed to finalize order: %v", err),
-			}, nil
-		}
-
-		log.Printf("Order finalized successfully")
-
-		// Wait a moment for certificate to be issued
-		// In production, would poll the order status until it becomes "valid"
-		// For now, just return that finalization succeeded
-		return &pb.CertResponse{
-			Status:  "processing",
-			OrderId: req.OrderId,
-			Details: "Order finalized with CSR. Certificate is being issued.",
-		}, nil
-	}
-
-	return &pb.CertResponse{
-		Status:  status,
-		OrderId: req.OrderId,
-		Details: fmt.Sprintf("Attestation validated. Order status: %s", status),
-	}, nil
+	return &pb.CertResponse{Status: status, OrderId: req.OrderId}, nil
 }
 
-// GetCertificate retrieves the issued certificate if ready
-func (s *Server) GetCertificate(ctx context.Context, req *pb.GetCertRequest) (*pb.CertResponse, error) {
-	log.Printf("Received get certificate request for order: %s", req.OrderId)
+func (s *Server) FinalizeOrder(ctx context.Context, req *pb.FinalizeRequest) (*pb.CertResponse, error) {
+	log.Printf("FinalizeOrder: orderID=%s", req.OrderId)
 
-	// Poll order status until it becomes "valid" or times out
-	// After finalization, OpenBao needs time to issue the certificate
-	maxAttempts := 10
-	for i := 0; i < maxAttempts; i++ {
-		status, err := s.openbaoClient.GetOrderStatus(ctx, req.OrderId)
-		if err != nil {
-			return &pb.CertResponse{
-				Status:  "error",
-				OrderId: req.OrderId,
-				Error:   fmt.Sprintf("Failed to check order status: %v", err),
-			}, nil
-		}
-
-		log.Printf("Order status check %d/%d: %s", i+1, maxAttempts, status)
-
-		if status == "valid" {
-			// Order is valid, certificate is ready
-			break
-		} else if status == "invalid" {
-			return &pb.CertResponse{
-				Status:  "error",
-				OrderId: req.OrderId,
-				Error:   "Order became invalid",
-			}, nil
-		}
-
-		// Still processing, wait a bit
-		if i < maxAttempts-1 {
-			time.Sleep(500 * time.Millisecond)
-		}
+	orderInfo, ok := s.orders[req.OrderId]
+	if !ok {
+		return &pb.CertResponse{Status: "error", OrderId: req.OrderId, Error: "order not found"}, nil
 	}
 
-	// Get certificate from OpenBao
+	orderInfo.CSR = req.CsrPem
+
+	if err := s.openbaoClient.FinalizeOrder(ctx, orderInfo.Order.FinalizeURL, req.CsrPem); err != nil {
+		return &pb.CertResponse{Status: "error", OrderId: req.OrderId, Error: err.Error()}, nil
+	}
+
+	return &pb.CertResponse{Status: "processing", OrderId: req.OrderId}, nil
+}
+
+func (s *Server) GetCertificate(ctx context.Context, req *pb.GetCertRequest) (*pb.CertResponse, error) {
+	log.Printf("GetCertificate: orderID=%s", req.OrderId)
+
+	status, err := s.openbaoClient.GetOrderStatus(ctx, req.OrderId)
+	log.Printf("GetCertificate: status=%s, err=%v", status, err)
+
+	// Return current status for polling - let client handle waiting
+	if status != "valid" {
+		return &pb.CertResponse{Status: status, OrderId: req.OrderId}, nil
+	}
+
 	cert, chain, err := s.openbaoClient.GetCertificate(ctx, req.OrderId)
 	if err != nil {
-		return &pb.CertResponse{
-			Status:  "error",
-			OrderId: req.OrderId,
-			Error:   fmt.Sprintf("Failed to get certificate: %v", err),
-		}, nil
+		return &pb.CertResponse{Status: "error", OrderId: req.OrderId, Error: err.Error()}, nil
 	}
-
-	log.Printf("✓ Certificate retrieved successfully for order: %s", req.OrderId)
 
 	return &pb.CertResponse{
 		Status:         "valid",
 		OrderId:        req.OrderId,
 		CertificatePem: cert,
 		ChainPem:       chain,
-		Details:        "Certificate issued successfully",
 	}, nil
 }
 
-// EnrollTPM enrolls a TPM device by configuring its root CA and allowlisting its identifier
-// WARNING: This is a PoC-only endpoint. In production, enrollment MUST be performed by
-// administrators through secure out-of-band channels, NOT by clients.
 func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*pb.EnrollmentResponse, error) {
-	log.Printf("========================================")
-	log.Printf("⚠️  WARNING: TPM ENROLLMENT REQUEST")
-	log.Printf("========================================")
-	log.Printf("Permanent ID: %s", req.PermanentIdentifier)
-	log.Printf("EK Root CA Name: %s", req.EkRootCaName)
-	log.Printf("Description: %s", req.DeviceDescription)
-	log.Printf("")
-	log.Printf("⚠️  SECURITY NOTICE:")
-	log.Printf("   In a production environment, TPM enrollment MUST be performed")
-	log.Printf("   by administrators through secure out-of-band channels.")
-	log.Printf("   This PoC allows client-initiated enrollment for demonstration")
-	log.Printf("   purposes ONLY. DO NOT use this pattern in production!")
-	log.Printf("========================================")
-	log.Printf("")
+	log.Printf("EnrollTPM request")
 
-	// Validate inputs
-	if req.PermanentIdentifier == "" {
-		return &pb.EnrollmentResponse{
-			Status: "error",
-			Error:  "permanent_identifier is required",
-		}, nil
+	block, _ := pem.Decode([]byte(req.EkCertificatePem))
+	if block == nil {
+		return &pb.EnrollmentResponse{Status: "error", Error: "invalid EK certificate PEM"}, nil
 	}
 
-	if req.EkRootCaPem == "" {
-		return &pb.EnrollmentResponse{
-			Status: "error",
-			Error:  "ek_root_ca_pem is required",
-		}, nil
-	}
-
-	if req.EkRootCaName == "" {
-		return &pb.EnrollmentResponse{
-			Status: "error",
-			Error:  "ek_root_ca_name is required",
-		}, nil
-	}
-
-	// Enroll the TPM device
-	err := s.openbaoClient.EnrollTPMDevice(ctx, req.PermanentIdentifier, req.EkRootCaPem, req.EkRootCaName)
+	ekCert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		log.Printf("❌ Failed to enroll TPM device: %v", err)
-		return &pb.EnrollmentResponse{
-			Status: "error",
-			Error:  fmt.Sprintf("Failed to enroll TPM: %v", err),
-		}, nil
+		return &pb.EnrollmentResponse{Status: "error", Error: err.Error()}, nil
 	}
 
-	log.Printf("✓ TPM device enrolled successfully!")
-	log.Printf("  - Permanent ID allowlisted: %s", req.PermanentIdentifier)
-	log.Printf("  - EK Root CA configured: %s", req.EkRootCaName)
-	log.Printf("  - EK validation enabled")
-	log.Printf("")
+	if _, _, err := s.validateEKCertificate(ekCert); err != nil {
+		return &pb.EnrollmentResponse{Status: "error", Error: err.Error()}, nil
+	}
 
+	ekHash, err := ComputeEKHashBase64(ekCert)
+	if err != nil {
+		return &pb.EnrollmentResponse{Status: "error", Error: err.Error()}, nil
+	}
+
+	s.allowedEKHashes[ekHash] = true
+
+	log.Printf("TPM enrolled: %s", ekHash)
 	return &pb.EnrollmentResponse{
 		Status:              "success",
-		Details:             "TPM device enrolled successfully. EK validation enabled and permanent identifier allowlisted.",
-		PermanentIdentifier: req.PermanentIdentifier,
-		EkRootCaName:        req.EkRootCaName,
+		PermanentIdentifier: ekHash,
 	}, nil
 }
 
-// ProvisionAIK issues an IAK certificate for a TPM attestation key (AK mode)
-// This endpoint acts as a Privacy CA, issuing AIK certificates for TPMs that lack
-// manufacturer-provisioned IAK certificates.
-func (s *Server) ProvisionAIK(ctx context.Context, req *pb.ProvisionAIKRequest) (*pb.ProvisionAIKResponse, error) {
-	log.Printf("========================================")
-	log.Printf("📋 IAK CERTIFICATE PROVISIONING REQUEST (AK Mode)")
-	log.Printf("========================================")
-	log.Printf("Permanent ID: %s", req.PermanentIdentifier)
-	log.Printf("AK CSR Size: %d bytes", len(req.AkCsrPem))
-	log.Printf("")
-	log.Printf("ℹ️  OpenBao acting as Privacy CA:")
-	log.Printf("   Signing CSR via /pki-ak mount to issue AIK certificate")
-	log.Printf("========================================")
-	log.Printf("")
+func (s *Server) ProvisionLAK(ctx context.Context, req *pb.ProvisionLAKRequest) (*pb.ProvisionLAKResponse, error) {
+	log.Printf("ProvisionLAK: permanentID=%s", req.PermanentIdentifier)
 
-	// Validate inputs
-	if req.PermanentIdentifier == "" {
-		return &pb.ProvisionAIKResponse{
-			Status: "error",
-			Error:  "permanent_identifier is required",
-		}, nil
+	if !s.allowedEKHashes[req.PermanentIdentifier] {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "device not enrolled"}, nil
 	}
 
-	if req.AkCsrPem == "" {
-		return &pb.ProvisionAIKResponse{
-			Status: "error",
-			Error:  "ak_csr_pem is required",
-		}, nil
+	var akParams attest.AttestationParameters
+	if err := json.Unmarshal(req.AkParameters, &akParams); err != nil {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: err.Error()}, nil
 	}
 
-	if req.EkCertificatePem == "" {
-		return &pb.ProvisionAIKResponse{
-			Status: "error",
-			Error:  "ek_certificate_pem is required",
-		}, nil
-	}
-
-	// Provision IAK certificate via OpenBao /pki-ak mount
-	iakCertPEM, iakRootCAPEM, notBefore, notAfter, err := s.openbaoClient.ProvisionIAKCertificate(
-		ctx,
-		req.PermanentIdentifier,
-		req.AkCsrPem,
-		req.EkCertificatePem,
-	)
+	ekPubKey, err := x509.ParsePKIXPublicKey(req.EkPublic)
 	if err != nil {
-		log.Printf("❌ Failed to provision IAK certificate: %v", err)
-		return &pb.ProvisionAIKResponse{
-			Status: "error",
-			Error:  fmt.Sprintf("Failed to provision AIK: %v", err),
-		}, nil
+		return &pb.ProvisionLAKResponse{Status: "error", Error: err.Error()}, nil
 	}
 
-	log.Printf("✓ AIK certificate provisioned successfully via /pki-ak!")
-	log.Printf("  - Permanent ID: %s", req.PermanentIdentifier)
-	log.Printf("  - Issuer: OpenBao /pki-ak CA")
-	log.Printf("  - Valid from: %s", notBefore)
-	log.Printf("  - Valid until: %s", notAfter)
-	log.Printf("")
+	activationParams := attest.ActivationParameters{
+		EK:   ekPubKey,
+		AK:   akParams,
+		Rand: rand.Reader,
+	}
 
-	return &pb.ProvisionAIKResponse{
-		Status:             "success",
-		IakCertificatePem:  iakCertPEM,
-		IakRootCaPem:       iakRootCAPEM,
-		NotBefore:          notBefore,
-		NotAfter:           notAfter,
+	secret, encryptedCredential, err := activationParams.Generate()
+	if err != nil {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: err.Error()}, nil
+	}
+
+	encCredBytes, _ := json.Marshal(encryptedCredential)
+
+	sessionID := uuid.New().String()
+	s.activationSessions[sessionID] = &ActivationSession{
+		PermanentID:    req.PermanentIdentifier,
+		AKParameters:   req.AkParameters,
+		EKCertPEM:      req.EkCertPem,
+		ExpectedSecret: secret,
+		CreatedAt:      time.Now(),
+	}
+
+	log.Printf("MakeCredential challenge generated: session=%s", sessionID)
+	return &pb.ProvisionLAKResponse{
+		Status:              "challenge",
+		EncryptedCredential: encCredBytes,
+		SessionId:           sessionID,
 	}, nil
 }
+
+func (s *Server) ActivateCredential(ctx context.Context, req *pb.ActivateCredentialRequest) (*pb.ActivateCredentialResponse, error) {
+	log.Printf("ActivateCredential: session=%s", req.SessionId)
+
+	session, exists := s.activationSessions[req.SessionId]
+	if !exists {
+		return &pb.ActivateCredentialResponse{Status: "error", Error: "invalid session"}, nil
+	}
+
+	if time.Since(session.CreatedAt) > 5*time.Minute {
+		delete(s.activationSessions, req.SessionId)
+		return &pb.ActivateCredentialResponse{Status: "error", Error: "session expired"}, nil
+	}
+
+	if string(req.DecryptedSecret) != string(session.ExpectedSecret) {
+		delete(s.activationSessions, req.SessionId)
+		return &pb.ActivateCredentialResponse{Status: "error", Error: "secret verification failed"}, nil
+	}
+
+	log.Printf("Secret verified - AK-EK binding proven")
+	delete(s.activationSessions, req.SessionId)
+
+	// Extract AK public key from attestation parameters
+	var akParams attest.AttestationParameters
+	if err := json.Unmarshal(session.AKParameters, &akParams); err != nil {
+		return &pb.ActivateCredentialResponse{Status: "error", Error: fmt.Sprintf("failed to parse AK parameters: %v", err)}, nil
+	}
+
+	akPubKey, err := attest.ParseAKPublic(akParams.Public)
+	if err != nil {
+		return &pb.ActivateCredentialResponse{Status: "error", Error: fmt.Sprintf("failed to parse AK public: %v", err)}, nil
+	}
+
+	// Build unsigned CSR from AK public key with SAN URI
+	// Subject is empty (privacy-preserving), SAN contains permanent identifier URI
+	// Format: urn:permanent-identifier:<value> (aligns with RFC 4043 concepts)
+	sanURI := fmt.Sprintf("urn:permanent-identifier:%s", session.PermanentID)
+	csrPEM, err := BuildUnsignedCSR(akPubKey.Public, "", []string{sanURI})
+	if err != nil {
+		return &pb.ActivateCredentialResponse{Status: "error", Error: fmt.Sprintf("failed to build CSR: %v", err)}, nil
+	}
+
+	log.Printf("Built unsigned CSR for AK with permanent identifier URI: %s", sanURI)
+
+	lakCertPEM, lakRootCAPEM, err := s.openbaoClient.SignLAKCertificate(ctx, session.PermanentID, csrPEM)
+	if err != nil {
+		return &pb.ActivateCredentialResponse{Status: "error", Error: err.Error()}, nil
+	}
+
+	block, _ := pem.Decode([]byte(lakCertPEM))
+	var notBefore, notAfter string
+	if block != nil {
+		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+			notBefore = cert.NotBefore.Format(time.RFC3339)
+			notAfter = cert.NotAfter.Format(time.RFC3339)
+		}
+	}
+
+	log.Printf("LAK certificate issued: %s", session.PermanentID)
+	return &pb.ActivateCredentialResponse{
+		Status:           "success",
+		LakCertificatePem: lakCertPEM,
+		LakRootCaPem:     lakRootCAPEM,
+		NotBefore:        notBefore,
+		NotAfter:         notAfter,
+	}, nil
+}
+
+func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
+	trustedCAs := make(map[string]*x509.Certificate)
+
+	log.Printf("Loading trusted EK CAs from: %s", caBasePath)
+
+	err := filepath.Walk(caBasePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+
+		if !strings.HasSuffix(strings.ToLower(info.Name()), ".crt") &&
+			!strings.HasSuffix(strings.ToLower(info.Name()), ".pem") {
+			return nil
+		}
+
+		certData, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		block, _ := pem.Decode(certData)
+		if block == nil {
+			return nil
+		}
+
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || !cert.IsCA {
+			return nil
+		}
+
+		relPath, _ := filepath.Rel(caBasePath, path)
+		caName := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+		trustedCAs[caName] = cert
+		log.Printf("  Loaded CA: %s", caName)
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	if len(trustedCAs) == 0 {
+		return nil, fmt.Errorf("no trusted CA certificates found")
+	}
+
+	return trustedCAs, nil
+}
+
+func (s *Server) validateEKCertificate(ekCert *x509.Certificate) (*x509.Certificate, string, error) {
+	for _, cert := range s.trustedEKCAs {
+		if cert.Subject.String() == ekCert.Issuer.String() {
+			if err := ekCert.CheckSignatureFrom(cert); err == nil {
+				for caName, ca := range s.trustedEKCAs {
+					if ca.Equal(cert) {
+						return cert, caName, nil
+					}
+				}
+				return cert, "unknown", nil
+			}
+		}
+	}
+
+	for caName, cert := range s.trustedEKCAs {
+		if cert.Subject.String() == cert.Issuer.String() {
+			if err := ekCert.CheckSignatureFrom(cert); err == nil {
+				return cert, caName, nil
+			}
+		}
+	}
+
+	return nil, "", fmt.Errorf("EK certificate issuer not found in trusted CAs")
+}
+
 
 func main() {
 	port := os.Getenv("GRPC_PORT")
@@ -329,29 +362,32 @@ func main() {
 
 	baoAddr := os.Getenv("BAO_ADDR")
 	if baoAddr == "" {
-		log.Fatal("BAO_ADDR environment variable not set")
+		log.Fatal("BAO_ADDR not set")
 	}
 
 	baoToken := os.Getenv("BAO_TOKEN")
 	if baoToken == "" {
-		log.Fatal("BAO_TOKEN environment variable not set")
+		log.Fatal("BAO_TOKEN not set")
 	}
 
-	logLevel := os.Getenv("LOG_LEVEL")
-	if logLevel == "" {
-		logLevel = "info"
+	log.Printf("Starting server on port %s", port)
+	log.Printf("OpenBao: %s", baoAddr)
+
+	caBasePath := os.Getenv("CA_BASE_PATH")
+	if caBasePath == "" {
+		caBasePath = "/ca"
 	}
 
-	log.Printf("Starting Certificate Service gRPC server on port %s", port)
-	log.Printf("OpenBao address: %s", baoAddr)
+	trustedCAs, err := loadTrustedEKCAs(caBasePath)
+	if err != nil {
+		log.Fatalf("Failed to load EK CAs: %v", err)
+	}
 
-	// Create OpenBao client
 	openbaoClient, err := NewOpenBaoClient(baoAddr, baoToken)
 	if err != nil {
 		log.Fatalf("Failed to create OpenBao client: %v", err)
 	}
 
-	// Create gRPC server
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
@@ -359,11 +395,14 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 	pb.RegisterCertificateServiceServer(grpcServer, &Server{
-		openbaoClient: openbaoClient,
-		orders:        make(map[string]*OrderInfo),
+		openbaoClient:      openbaoClient,
+		orders:             make(map[string]*OrderInfo),
+		trustedEKCAs:       trustedCAs,
+		allowedEKHashes:    make(map[string]bool),
+		activationSessions: make(map[string]*ActivationSession),
 	})
 
-	log.Printf("gRPC server listening on port %s", port)
+	log.Printf("Server ready")
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}

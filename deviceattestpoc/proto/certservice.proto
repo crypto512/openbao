@@ -7,172 +7,91 @@ package certservice;
 
 option go_package = "github.com/openbao/openbao/deviceattestpoc/proto;certservice";
 
-// CertificateService provides certificate issuance with TPM device attestation
 service CertificateService {
-  // RequestCertificate initiates a certificate request and returns the device attestation challenge
   rpc RequestCertificate(CertRequest) returns (CertResponse);
-
-  // SubmitAttestation submits the TPM attestation response for validation
   rpc SubmitAttestation(AttestationSubmit) returns (CertResponse);
-
-  // GetCertificate retrieves the issued certificate if ready
+  rpc FinalizeOrder(FinalizeRequest) returns (CertResponse);
   rpc GetCertificate(GetCertRequest) returns (CertResponse);
-
-  // EnrollTPM enrolls a TPM device by configuring its root CA and identifier
-  // WARNING: This is a PoC-only endpoint. In production, enrollment MUST be
-  // performed by administrators through secure out-of-band channels, NOT by clients.
   rpc EnrollTPM(TPMEnrollmentRequest) returns (EnrollmentResponse);
-
-  // ProvisionAIK issues an IAK certificate for a TPM attestation key (AK mode)
-  // This endpoint acts as a Privacy CA, issuing IAK certificates for TPMs that lack
-  // manufacturer-provisioned IAK certificates. The AK is created by the client using
-  // go-attestation NewAK(), and OpenBao signs it after validating the enrolled EK.
-  rpc ProvisionAIK(ProvisionAIKRequest) returns (ProvisionAIKResponse);
+  rpc ProvisionLAK(ProvisionLAKRequest) returns (ProvisionLAKResponse);
+  rpc ActivateCredential(ActivateCredentialRequest) returns (ActivateCredentialResponse);
 }
 
-// CertRequest contains the certificate signing request for IPsec VPN
 message CertRequest {
-  // Common name for the certificate (e.g., "vpn-client-12345")
   string common_name = 1;
-
-  // Subject Alternative Names - IP addresses
   repeated string san_ips = 2;
-
-  // Subject Alternative Names - DNS names
   repeated string san_dns = 3;
-
-  // PEM-encoded Certificate Signing Request
-  string csr_pem = 4;
-
-  // Permanent identifier from TPM (serial number or device ID)
-  string permanent_identifier = 5;
+  string permanent_identifier = 4;
+  string usage = 5;  // Certificate usage (e.g., "ipsec-vpn", "wifi") - maps to PKI role
 }
 
-// AttestationSubmit contains the TPM attestation object
 message AttestationSubmit {
-  // Order ID from the initial certificate request
   string order_id = 1;
-
-  // Authorization URL for the challenge
   string authorization_url = 2;
-
-  // Challenge URL to submit attestation to
   string challenge_url = 3;
-
-  // Base64url-encoded CBOR attestation object
-  // Format: {fmt: "tpm", attStmt: {ver, alg, x5c, sig, certInfo, pubArea}}
   string attestation_object = 4;
 }
 
-// GetCertRequest requests the certificate for a finalized order
+message FinalizeRequest {
+  string order_id = 1;
+  string csr_pem = 2;
+}
+
 message GetCertRequest {
-  // Order ID to retrieve certificate for
   string order_id = 1;
 }
 
-// CertResponse contains the response for certificate operations
 message CertResponse {
-  // Status of the request: "pending", "ready", "valid", "invalid", "error"
   string status = 1;
-
-  // Order ID for tracking the certificate request
   string order_id = 2;
-
-  // Authorization URL containing the challenge
   string authorization_url = 3;
-
-  // Challenge URL for device-attest-01
   string challenge_url = 4;
-
-  // Challenge token for building key authorization
   string challenge_token = 5;
-
-  // Account thumbprint for key authorization (JWK thumbprint)
   string account_thumbprint = 6;
-
-  // PEM-encoded certificate if status is "valid"
-  string certificate_pem = 7;
-
-  // Certificate chain (intermediate + root) in PEM format
-  repeated string chain_pem = 8;
-
-  // Error message if status is "error"
-  string error = 9;
-
-  // Additional information for debugging
-  string details = 10;
+  string finalize_url = 7;
+  string certificate_pem = 8;
+  repeated string chain_pem = 9;
+  string error = 10;
+  string details = 11;
 }
 
-// TPMEnrollmentRequest contains TPM enrollment data sent by the client
-// WARNING: In production, this data MUST be provided by administrators through
-// secure out-of-band channels. This PoC allows clients to send it for demonstration
-// purposes only.
 message TPMEnrollmentRequest {
-  // TPM permanent identifier to allowlist
-  string permanent_identifier = 1;
-
-  // PEM-encoded TPM EK root CA certificate
-  // This is the manufacturer's root certificate that signs the EK certificate chain
-  string ek_root_ca_pem = 2;
-
-  // Name/identifier for the EK root CA (e.g., "intel", "infineon")
-  string ek_root_ca_name = 3;
-
-  // Optional: Description of the TPM device
-  string device_description = 4;
+  string ek_certificate_pem = 1;
+  string device_description = 2;
 }
 
-// EnrollmentResponse contains the result of TPM enrollment
 message EnrollmentResponse {
-  // Status: "success" or "error"
   string status = 1;
-
-  // Error message if status is "error"
   string error = 2;
-
-  // Confirmation details
   string details = 3;
-
-  // The enrolled permanent identifier
   string permanent_identifier = 4;
-
-  // The enrolled EK root CA name
-  string ek_root_ca_name = 5;
 }
 
-// ProvisionAIKRequest requests an IAK certificate for a new attestation key
-// This is used in AK mode when TPM lacks manufacturer-provisioned IAK
-message ProvisionAIKRequest {
-  // TPM permanent identifier (must be already enrolled)
+message ProvisionLAKRequest {
   string permanent_identifier = 1;
-
-  // PEM-encoded Certificate Signing Request for the AK
-  // The CSR must be created by the client using the AK private key in the TPM
-  // This ensures the issued certificate contains the AK public key from the TPM
-  string ak_csr_pem = 2;
-
-  // PEM-encoded EK certificate for validation
-  // Must match the enrolled permanent_identifier
-  string ek_certificate_pem = 3;
+  bytes ak_parameters = 2;
+  bytes ek_public = 3;
+  string ek_cert_pem = 4;
 }
 
-// ProvisionAIKResponse contains the OpenBao-issued IAK certificate
-message ProvisionAIKResponse {
-  // Status: "success" or "error"
+message ProvisionLAKResponse {
   string status = 1;
-
-  // Error message if status is "error"
   string error = 2;
+  bytes encrypted_credential = 3;
+  string session_id = 4;
+  string details = 5;
+}
 
-  // PEM-encoded AIK certificate signed by OpenBao /pki-ak CA
-  // This certificate can be used in TPM attestation (x5c field)
-  string iak_certificate_pem = 3;
+message ActivateCredentialRequest {
+  string session_id = 1;
+  bytes decrypted_secret = 2;
+}
 
-  // PEM-encoded OpenBao /pki-ak root CA certificate
-  // For building the certificate chain
-  string iak_root_ca_pem = 4;
-
-  // Certificate validity period
+message ActivateCredentialResponse {
+  string status = 1;
+  string error = 2;
+  string lak_certificate_pem = 3;
+  string lak_root_ca_pem = 4;
   string not_before = 5;
   string not_after = 6;
 }

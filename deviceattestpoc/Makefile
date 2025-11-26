@@ -1,31 +1,52 @@
 # Makefile for ACME Device Attestation PoC
-# Simplified wrapper around docker-compose with optimized build caching
+# Device attestation tools: da-fingerprint, da-lak, da-gen
 
-.PHONY: help build clean run-server run-client-swtpm-iak run-client-swtpm-ak run-client-hw-iak run-client-hw-ak run-test-swtpm-ak
+.PHONY: help build bin clean clean-client clean-pki clean-swtpm run-server da-fingerprint da-lak da-gen
 
 help:
 	@echo "ACME Device Attestation PoC - Make targets:"
 	@echo ""
-	@echo "  make build                - Build all containers with layer caching"
-	@echo "  make clean                - Clean containers and volumes"
+	@echo "  make build                - Build all containers"
+	@echo "  make bin                  - Extract binaries to ./bin/"
+	@echo "  make clean                - Clean containers, volumes, and images"
+	@echo ""
+	@echo "Cleanup targets (with dependencies):"
+	@echo "  make clean-client         - Clean client state (LAK, certs)"
+	@echo "  make clean-pki            - Clean OpenBao PKI state (requires clean-client)"
+	@echo "  make clean-swtpm          - Clean SWTPM state (requires clean-client)"
 	@echo ""
 	@echo "  make run-server           - Start server infrastructure (OpenBao + gRPC + SWTPM)"
-	@echo "  make run-client-swtpm-iak - Run client with SWTPM in IAK mode"
-	@echo "  make run-client-swtpm-ak  - Run client with SWTPM in AK mode"
-	@echo "  make run-client-hw-iak    - Run client with HARDWARE TPM in IAK mode (requires /dev/tpm0)"
-	@echo "  make run-client-hw-ak     - Run client with HARDWARE TPM in AK mode (requires /dev/tpm0)"
 	@echo ""
-	@echo "  make run-test-swtpm-ak    - Run automated end-to-end test with SWTPM (AK mode)"
+	@echo "Device Attestation Tools:"
+	@echo "  make da-fingerprint       - Display permanent identifier (EK hash)"
+	@echo "  make da-lak               - Provision LAK certificate"
+	@echo "  make da-gen USAGE=<name>  - Generate attested certificate (e.g., USAGE=ipsec-vpn)"
 	@echo ""
-	@echo "All builds use Docker layer caching for fast incremental builds."
+	@echo "Examples:"
+	@echo "  make da-fingerprint"
+	@echo "  make da-lak"
+	@echo "  make da-gen USAGE=ipsec-vpn"
 	@echo ""
 
-# Build all containers with layer caching using dedicated builder
+# Build all containers
 build:
-	@echo "Building all containers with layer caching..."
+	@echo "Building all containers..."
 	@docker buildx create --name deviceattestpoc-builder --use 2>/dev/null || docker buildx use deviceattestpoc-builder
 	@docker compose build
 	@echo "✓ Build complete"
+
+# Extract binaries from client container to ./bin/
+bin: build
+	@echo "Extracting binaries to ./bin/..."
+	@mkdir -p bin
+	@docker create --name da-bin-extract deviceattestpoc-client true 2>/dev/null || \
+		(docker rm -f da-bin-extract 2>/dev/null && docker create --name da-bin-extract deviceattestpoc-client true)
+	@docker cp da-bin-extract:/bin/da-fingerprint bin/
+	@docker cp da-bin-extract:/bin/da-lak bin/
+	@docker cp da-bin-extract:/bin/da-gen bin/
+	@docker rm -f da-bin-extract
+	@echo "✓ Binaries extracted:"
+	@ls -la bin/da-*
 
 # Clean containers, volumes, and images
 clean:
@@ -33,6 +54,31 @@ clean:
 	@docker compose down -v --rmi all --remove-orphans 2>/dev/null || true
 	@docker buildx rm deviceattestpoc-builder 2>/dev/null || true
 	@echo "✓ Cleaned"
+
+# Clean client state (LAK, certs)
+clean-client:
+	@echo "Cleaning client state..."
+	@docker compose rm -sf client 2>/dev/null || true
+	@docker ps -a --filter "name=deviceattestpoc-client-run" -q | xargs -r docker rm -f 2>/dev/null || true
+	@docker volume rm deviceattestpoc_client-da-config deviceattestpoc_client-hw-da-config deviceattestpoc_client-certs 2>/dev/null || true
+	@echo "✓ Client state cleaned (LAK, certs removed)"
+
+# Clean OpenBao PKI state (requires clean-client first)
+clean-pki: clean-client
+	@echo "Cleaning OpenBao PKI state..."
+	@docker compose rm -sf openbao init server 2>/dev/null || true
+	@docker ps -a --filter "name=deviceattestpoc-server-run" -q | xargs -r docker rm -f 2>/dev/null || true
+	@docker volume rm deviceattestpoc_openbao-data deviceattestpoc_server-acme-accounts 2>/dev/null || true
+	@echo "✓ PKI state cleaned (OpenBao data, ACME accounts removed)"
+	@echo "  Note: SWTPM state preserved (EK unchanged)"
+
+# Clean SWTPM state (requires clean-client first because EK changes)
+clean-swtpm: clean-client
+	@echo "Cleaning SWTPM state..."
+	@docker compose stop tpm1 2>/dev/null || true
+	@docker volume rm deviceattestpoc_swtpm-state 2>/dev/null || true
+	@echo "✓ SWTPM state cleaned (EK certificates will be regenerated)"
+	@echo "  Note: Client state also cleaned (EK hash changes)"
 
 # Run server infrastructure
 run-server:
@@ -43,42 +89,30 @@ run-server:
 	@echo ""
 	@docker compose up openbao init server tpm1
 
-# Run client with SWTPM in IAK mode
-run-client-swtpm-iak:
-	@echo "Running client with SWTPM in IAK mode..."
-	@echo "Mode: Manufacturer-provisioned IAK certificate"
-	@docker compose run --rm client /client -attest-mode iak
+# Display permanent identifier (EK hash)
+da-fingerprint:
+	@echo "Device Permanent Identifier:"
+	@docker compose run --rm client /bin/da-fingerprint
 
-# Run client with SWTPM in AK mode
-run-client-swtpm-ak:
-	@echo "Running client with SWTPM in AK mode..."
-	@echo "Mode: NewAK with OpenBao-issued IAK certificate"
-	@docker compose run --rm client /client -attest-mode ak
+# Provision LAK certificate
+da-lak:
+	@echo "Provisioning LAK certificate..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client /bin/da-lak
+	@echo "✓ LAK provisioned"
 
-# Run client with HARDWARE TPM in IAK mode
-run-client-hw-iak:
-	@echo "Running client with HARDWARE TPM in IAK mode..."
-	@echo "Mode: Manufacturer-provisioned IAK certificate"
-	@echo "Note: Requires /dev/tpm0 and /dev/tpmrm0 devices"
+# Generate attested certificate
+# Usage: make da-gen USAGE=vpn
+da-gen:
+ifndef USAGE
+	$(error USAGE is required. Example: make da-gen USAGE=vpn)
+endif
+	@echo "Generating certificate for usage=$(USAGE)..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client /bin/da-gen --usage $(USAGE)
+	@echo "✓ Certificate generated"
 	@echo ""
-	@docker compose --profile hardware run --rm client-hw /client -attest-mode iak
-
-# Run client with HARDWARE TPM in AK mode
-run-client-hw-ak:
-	@echo "Running client with HARDWARE TPM in AK mode..."
-	@echo "Mode: NewAK with OpenBao-issued IAK certificate"
-	@echo "Note: Requires /dev/tpm0 and /dev/tpmrm0 devices"
-	@echo ""
-	@docker compose --profile hardware run --rm client-hw /client -attest-mode ak
-
-# Automated end-to-end test with SWTPM in AK mode
-run-test-swtpm-ak:
-	@echo "Running automated end-to-end test (SWTPM AK mode)..."
-	@docker compose up -d
-	@sleep 20
-	@echo ""
-	@echo "=== Client logs ==="
-	@docker logs cert-client 2>&1 | grep -E "(Step|✓|Error|Failed|ACME)" || true
-	@echo ""
-	@docker compose down
-	@echo "✓ Test completed"
+	@echo "Output files in container volume 'client-certs':"
+	@docker compose run --rm client ls -la /certs/$(USAGE)-*.pem 2>/dev/null || echo "  (files available after successful generation)"

@@ -1354,9 +1354,12 @@ func signCertificate(data *CreationBundle, randReader io.Reader) (*ParsedCertBun
 		return nil, errutil.UserError{Err: "nil csr given to signCertificate"}
 	}
 
-	err := data.CSR.CheckSignature()
-	if err != nil {
-		return nil, errutil.UserError{Err: "request signature invalid"}
+	// Check CSR signature unless explicitly skipped (for TPM attestation workflows)
+	if !data.Params.SkipCSRSignatureValidation {
+		err := data.CSR.CheckSignature()
+		if err != nil {
+			return nil, errutil.UserError{Err: "request signature invalid"}
+		}
 	}
 
 	result := &ParsedCertBundle{}
@@ -1508,9 +1511,16 @@ func signCertificateWithTemplate(caSign *CAInfoBundle, CSR *x509.CertificateRequ
 		return nil, errutil.UserError{Err: "nil csr given to signCertificate"}
 	}
 
-	err := CSR.CheckSignature()
-	if err != nil {
-		return nil, errutil.UserError{Err: "request signature invalid"}
+	// Check CSR signature unless explicitly skipped (for TPM attestation workflows)
+	skipSigCheck := false
+	if v, ok := evaluationData["skip_csr_signature_validation"].(bool); ok {
+		skipSigCheck = v
+	}
+	if !skipSigCheck {
+		err := CSR.CheckSignature()
+		if err != nil {
+			return nil, errutil.UserError{Err: "request signature invalid"}
+		}
 	}
 
 	serialNumber, err := GenerateSerialNumber()

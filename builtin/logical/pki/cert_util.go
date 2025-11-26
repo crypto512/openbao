@@ -1621,6 +1621,7 @@ func generateCreationBundle(b *backend, data *inputBundle, caSign *certutil.CAIn
 			ForceAppendCaChain:            caSign != nil,
 			SKID:                          skid,
 			ExtraExtensions:               extraExtensions,
+			SkipCSRSignatureValidation:    data.role.AllowUnsignedCSR,
 		},
 		SigningBundle: caSign,
 		CSR:           csr,

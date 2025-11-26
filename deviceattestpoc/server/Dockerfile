@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 # Build stage - Optimized for Docker layer caching
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /build
 
@@ -32,7 +32,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /server .
 # Runtime stage
 FROM alpine:3.22
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates netcat-openbsd
 
 COPY --from=builder /server /server
 

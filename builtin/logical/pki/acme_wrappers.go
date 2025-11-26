@@ -400,8 +400,11 @@ func getAcmeRoleAndIssuer(sc *storageContext, data *framework.FieldData, config 
 	}
 
 	// If not allowed in configuration, override ExtKeyUsage behavior to force it to only be
-	// ServerAuth within ACME issued certs
-	if !config.AllowRoleExtKeyUsage {
+	// ServerAuth within ACME issued certs.
+	// Exception: roles with device attestation enabled preserve their configured EKU,
+	// as device attestation certificates serve different purposes (VPN clients, IoT devices)
+	// rather than web server authentication.
+	if !config.AllowRoleExtKeyUsage && !role.AllowDeviceAttestation {
 		role.ExtKeyUsage = []string{"serverauth"}
 		role.ExtKeyUsageOIDs = []string{}
 		role.ServerFlag = true
