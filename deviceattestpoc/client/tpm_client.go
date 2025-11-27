@@ -62,21 +62,6 @@ type TPMClient struct {
 	tpmDevice           string
 }
 
-// flushAllTransientHandles clears all transient object and session handles from the TPM
-// This prevents "out of memory for object contexts" and "out of memory for session contexts" errors
-func flushAllTransientHandles(rwc io.ReadWriteCloser) {
-	// Transient object handles are in range 0x80000000 - 0x80FFFFFF
-	// Try to flush the first few slots that might be in use
-	for i := tpmutil.Handle(0x80000000); i < 0x80000010; i++ {
-		tpm2.FlushContext(rwc, i)
-	}
-	// Session handles are in range 0x03000000 - 0x03FFFFFF
-	// Flush any leftover sessions
-	for i := tpmutil.Handle(0x03000000); i < 0x03000010; i++ {
-		tpm2.FlushContext(rwc, i)
-	}
-}
-
 func NewTPMClient(tpmPath string) (*TPMClient, error) {
 	log.Printf("Initializing TPM client")
 
@@ -88,9 +73,6 @@ func NewTPMClient(tpmPath string) (*TPMClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open TPM at %s: %w", tpmPath, err)
 	}
-
-	// Clean up any leftover transient handles from previous runs
-	flushAllTransientHandles(rwc)
 
 	c := &TPMClient{
 		rwc:       rwc,
