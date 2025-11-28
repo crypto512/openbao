@@ -18,7 +18,14 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/stretchr/testify/require"
+)
+
+// TPM 2.0 constants for testing (matching go-tpm values)
+const (
+	testTPMGeneratedValue  = 0xff544347
+	testTPMSTAttestCertify = 0x8017
 )
 
 func TestTPMAttestationValidator_SupportsFormat(t *testing.T) {
@@ -149,11 +156,11 @@ func TestVerifyTPMSignature_RSA(t *testing.T) {
 	rawSignature, err := rsa.SignPKCS1v15(rand.Reader, privKey, crypto.SHA256, hash[:])
 	require.NoError(t, err)
 
-	// Wrap in TPMT_SIGNATURE structure
-	signature := createTestTPMTSignature(rawSignature, TPM_ALG_RSASSA, TPM_ALG_SHA256)
+	// Wrap in TPMT_SIGNATURE structure using go-tpm constants
+	signature := createTestTPMTSignature(rawSignature, uint16(tpm2.AlgRSASSA), uint16(tpm2.AlgSHA256))
 
 	// Verify
-	err = verifyTPMSignature(aikCert, certInfo, signature, -257) // RS256
+	err = verifyTPMSignature(aikCert, certInfo, signature)
 	require.NoError(t, err)
 }
 
@@ -171,10 +178,10 @@ func TestVerifyTPMSignature_InvalidSignature(t *testing.T) {
 	// Invalid signature (random bytes wrapped in TPMT_SIGNATURE)
 	invalidRawSig := make([]byte, 256)
 	rand.Read(invalidRawSig)
-	invalidSignature := createTestTPMTSignature(invalidRawSig, TPM_ALG_RSASSA, TPM_ALG_SHA256)
+	invalidSignature := createTestTPMTSignature(invalidRawSig, uint16(tpm2.AlgRSASSA), uint16(tpm2.AlgSHA256))
 
 	// Verify should fail
-	err = verifyTPMSignature(aikCert, certInfo, invalidSignature, -257) // RS256
+	err = verifyTPMSignature(aikCert, certInfo, invalidSignature)
 	require.Error(t, err)
 }
 
@@ -189,52 +196,6 @@ func createTestTPMTSignature(rawSig []byte, sigAlg, hashAlg uint16) []byte {
 }
 
 
-func TestBytesEqual(t *testing.T) {
-	tests := []struct {
-		name     string
-		a        []byte
-		b        []byte
-		expected bool
-	}{
-		{
-			name:     "equal slices",
-			a:        []byte{1, 2, 3, 4},
-			b:        []byte{1, 2, 3, 4},
-			expected: true,
-		},
-		{
-			name:     "different slices",
-			a:        []byte{1, 2, 3, 4},
-			b:        []byte{1, 2, 3, 5},
-			expected: false,
-		},
-		{
-			name:     "different lengths",
-			a:        []byte{1, 2, 3},
-			b:        []byte{1, 2, 3, 4},
-			expected: false,
-		},
-		{
-			name:     "empty slices",
-			a:        []byte{},
-			b:        []byte{},
-			expected: true,
-		},
-		{
-			name:     "nil slices",
-			a:        nil,
-			b:        nil,
-			expected: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := bytesEqual(tt.a, tt.b)
-			require.Equal(t, tt.expected, result)
-		})
-	}
-}
 
 func TestTPMAttestationValidator_ValidateAttestation_WrongFormat(t *testing.T) {
 	validator := &TPMAttestationValidator{}
@@ -305,13 +266,19 @@ func createTestAIKCertificate(t *testing.T, privKey *rsa.PrivateKey, permanentID
 	return cert
 }
 
+// writeTPM2B writes a TPM2B structure (2-byte size prefix + data)
+func writeTPM2B(buf *bytes.Buffer, data []byte) {
+	binary.Write(buf, binary.BigEndian, uint16(len(data)))
+	buf.Write(data)
+}
+
 func createTestCertInfo(t *testing.T, extraData []byte) []byte {
 	buf := new(bytes.Buffer)
 
-	// Magic
-	binary.Write(buf, binary.BigEndian, uint32(TPM_GENERATED_VALUE))
-	// Type
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ST_ATTEST_CERTIFY))
+	// Magic (TPM_GENERATED_VALUE = 0xff544347)
+	binary.Write(buf, binary.BigEndian, uint32(testTPMGeneratedValue))
+	// Type (TPM_ST_ATTEST_CERTIFY = 0x8017)
+	binary.Write(buf, binary.BigEndian, uint16(testTPMSTAttestCertify))
 	// QualifiedSigner
 	writeTPM2B(buf, []byte("test-signer"))
 	// ExtraData
@@ -335,17 +302,17 @@ func createTestPubArea(t *testing.T, pubKey *rsa.PublicKey) []byte {
 	buf := new(bytes.Buffer)
 
 	// Type (RSA)
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSA))
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgRSA))
 	// NameAlg (SHA256)
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256))
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgSHA256))
 	// ObjectAttributes
 	binary.Write(buf, binary.BigEndian, uint32(0x00000001))
 	// AuthPolicy (empty)
 	writeTPM2B(buf, nil)
 	// RSA Parameters
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_NULL))   // symmetric
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSASSA)) // scheme
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256)) // hash alg
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgNull))   // symmetric
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgRSASSA)) // scheme
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgSHA256)) // hash alg
 	binary.Write(buf, binary.BigEndian, uint16(2048))           // keyBits
 	binary.Write(buf, binary.BigEndian, uint32(0))              // exponent (0 = 65537)
 	// Unique (RSA modulus)

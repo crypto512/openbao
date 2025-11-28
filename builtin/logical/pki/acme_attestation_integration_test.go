@@ -19,7 +19,14 @@ import (
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/stretchr/testify/require"
+)
+
+// TPM 2.0 constants for integration testing (matching go-tpm values)
+const (
+	integrationTPMGeneratedValue  = 0xff544347
+	integrationTPMSTAttestCertify = 0x8017
 )
 
 // SimulatedTPM simulates a TPM 2.0 device for testing
@@ -108,7 +115,7 @@ func (s *SimulatedTPM) GenerateAttestation(t *testing.T, keyAuthorization string
 	require.NoError(t, err)
 
 	// Wrap raw signature in TPMT_SIGNATURE structure
-	signature := s.createTPMTSignature(rawSignature, TPM_ALG_RSASSA, TPM_ALG_SHA256)
+	signature := s.createTPMTSignature(rawSignature, uint16(tpm2.AlgRSASSA), uint16(tpm2.AlgSHA256))
 
 	// Build attestation statement
 	attStmt := map[string]interface{}{
@@ -139,17 +146,17 @@ func (s *SimulatedTPM) createPubArea(t *testing.T, pubKey *rsa.PublicKey) []byte
 	buf := new(bytes.Buffer)
 
 	// Type (RSA)
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSA))
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgRSA))
 	// NameAlg (SHA256)
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256))
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgSHA256))
 	// ObjectAttributes
 	binary.Write(buf, binary.BigEndian, uint32(0x00060472)) // Standard AIK attributes
 	// AuthPolicy (empty)
 	s.writeTPM2B(buf, nil)
 	// RSA Parameters
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_NULL))   // symmetric
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSASSA)) // scheme
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256)) // hash alg
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgNull))   // symmetric
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgRSASSA)) // scheme
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgSHA256)) // hash alg
 	binary.Write(buf, binary.BigEndian, uint16(2048))           // keyBits
 	binary.Write(buf, binary.BigEndian, uint32(65537))          // exponent
 	// Unique (RSA modulus)
@@ -162,12 +169,14 @@ func (s *SimulatedTPM) createPubArea(t *testing.T, pubKey *rsa.PublicKey) []byte
 func (s *SimulatedTPM) createCertInfo(t *testing.T, qualifyingData []byte, pubArea []byte) []byte {
 	buf := new(bytes.Buffer)
 
-	// Magic
-	binary.Write(buf, binary.BigEndian, uint32(TPM_GENERATED_VALUE))
-	// Type
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ST_ATTEST_CERTIFY))
-	// QualifiedSigner
-	s.writeTPM2B(buf, []byte("signer"))
+	// Magic (TPM_GENERATED_VALUE = 0xff544347)
+	binary.Write(buf, binary.BigEndian, uint32(integrationTPMGeneratedValue))
+	// Type (TPM_ST_ATTEST_CERTIFY = 0x8017)
+	binary.Write(buf, binary.BigEndian, uint16(integrationTPMSTAttestCertify))
+	// QualifiedSigner - must be a proper TPM Name structure (nameAlg || digest)
+	// Create a dummy signer name with SHA256 algorithm ID
+	signerName := createDummyTPMName([]byte("signer-identity-hash-placeholder"))
+	s.writeTPM2B(buf, signerName)
 	// ExtraData (this is the key authorization hash!)
 	s.writeTPM2B(buf, qualifyingData)
 	// ClockInfo
@@ -179,15 +188,38 @@ func (s *SimulatedTPM) createCertInfo(t *testing.T, qualifyingData []byte, pubAr
 	binary.Write(buf, binary.BigEndian, uint64(0x0001000200030004))
 
 	// TPMS_CERTIFY_INFO
-	// Compute the name of the certified object
-	pub, err := ParseTPMT_PUBLIC(pubArea)
-	require.NoError(t, err)
-	name, err := pub.ComputeName(pubArea)
-	require.NoError(t, err)
+	// Compute the name of the certified object: nameAlg || Hash(pubArea)
+	nameBytes := computeTPMNameFromPubArea(pubArea)
+	s.writeTPM2B(buf, nameBytes)
+	// QualifiedName - also needs proper TPM Name format
+	qualifiedName := createDummyTPMName([]byte("qualified-name-hash-placeholder!"))
+	s.writeTPM2B(buf, qualifiedName)
 
-	s.writeTPM2B(buf, name)
-	s.writeTPM2B(buf, []byte("qualified-name"))
+	return buf.Bytes()
+}
 
+// createDummyTPMName creates a TPM Name structure with SHA256 algorithm
+// Format: algorithm (2 bytes, big-endian) || digest
+func createDummyTPMName(digestData []byte) []byte {
+	// Ensure digest is exactly 32 bytes for SHA256
+	digest := make([]byte, 32)
+	copy(digest, digestData)
+
+	buf := new(bytes.Buffer)
+	// Algorithm ID for SHA256 = 0x000B
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgSHA256))
+	buf.Write(digest)
+	return buf.Bytes()
+}
+
+// computeTPMNameFromPubArea computes the TPM Name from a pubArea byte slice
+// Name = nameAlg (2 bytes) || Hash(pubArea)
+// For SHA256 nameAlg (0x000B), this is 34 bytes total
+func computeTPMNameFromPubArea(pubArea []byte) []byte {
+	hash := sha256.Sum256(pubArea)
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint16(tpm2.AlgSHA256))
+	buf.Write(hash[:])
 	return buf.Bytes()
 }
 
@@ -401,9 +433,9 @@ func TestACMEDeviceAttestationEndToEnd_WithIntermediateCA(t *testing.T) {
 
 	// Create certInfo with proper name
 	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.BigEndian, uint32(TPM_GENERATED_VALUE))
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ST_ATTEST_CERTIFY))
-	writeTPM2B(buf, []byte("signer"))
+	binary.Write(buf, binary.BigEndian, uint32(integrationTPMGeneratedValue))
+	binary.Write(buf, binary.BigEndian, uint16(integrationTPMSTAttestCertify))
+	writeTPM2B(buf, createDummyTPMName([]byte("signer-identity-hash-placeholder")))
 	writeTPM2B(buf, qualifyingData)
 	binary.Write(buf, binary.BigEndian, uint64(time.Now().Unix()))
 	binary.Write(buf, binary.BigEndian, uint32(1))
@@ -411,13 +443,10 @@ func TestACMEDeviceAttestationEndToEnd_WithIntermediateCA(t *testing.T) {
 	binary.Write(buf, binary.BigEndian, byte(1))
 	binary.Write(buf, binary.BigEndian, uint64(0x0001000200030004))
 
-	pub, err := ParseTPMT_PUBLIC(pubArea)
-	require.NoError(t, err)
-	name, err := pub.ComputeName(pubArea)
-	require.NoError(t, err)
-
-	writeTPM2B(buf, name)
-	writeTPM2B(buf, []byte("qualified-name"))
+	// Compute the name of the certified object: nameAlg || Hash(pubArea)
+	nameBytes := computeTPMNameFromPubArea(pubArea)
+	writeTPM2B(buf, nameBytes)
+	writeTPM2B(buf, createDummyTPMName([]byte("qualified-name-hash-placeholder!")))
 	certInfo := buf.Bytes()
 
 	// Sign with AIK key
@@ -426,7 +455,7 @@ func TestACMEDeviceAttestationEndToEnd_WithIntermediateCA(t *testing.T) {
 	require.NoError(t, err)
 
 	// Wrap raw signature in TPMT_SIGNATURE structure
-	signature := createTPMTSignatureHelper(rawSignature, TPM_ALG_RSASSA, TPM_ALG_SHA256)
+	signature := createTPMTSignatureHelper(rawSignature, uint16(tpm2.AlgRSASSA), uint16(tpm2.AlgSHA256))
 
 	// Build attestation statement with FULL CHAIN (AIK + Intermediate)
 	attStmt := map[string]interface{}{
