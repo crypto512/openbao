@@ -331,22 +331,29 @@ func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
 			return nil
 		}
 
+		relPath, _ := filepath.Rel(caBasePath, path)
 		ext := strings.ToLower(filepath.Ext(info.Name()))
 		if ext != ".crt" && ext != ".pem" && ext != ".der" && ext != ".cer" {
+			log.Printf("  Skipped (unsupported extension): %s", relPath)
 			return nil
 		}
 
 		certData, err := os.ReadFile(path)
 		if err != nil {
+			log.Printf("  Skipped (read error): %s: %v", relPath, err)
 			return nil
 		}
 
 		cert, err := parseCertificateAuto(certData, ext)
-		if err != nil || !cert.IsCA {
+		if err != nil {
+			log.Printf("  Skipped (parse error): %s: %v", relPath, err)
+			return nil
+		}
+		if !cert.IsCA {
+			log.Printf("  Skipped (not a CA): %s", relPath)
 			return nil
 		}
 
-		relPath, _ := filepath.Rel(caBasePath, path)
 		caName := strings.TrimSuffix(relPath, filepath.Ext(relPath))
 		trustedCAs[caName] = cert
 		log.Printf("  Loaded CA: %s (%s)", caName, ext)
