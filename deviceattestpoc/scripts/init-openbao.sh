@@ -5,11 +5,15 @@ set -e
 echo "Initializing OpenBao for Device Attestation"
 echo "OpenBao: $BAO_ADDR"
 
+KEYS_FILE="/data/openbao-keys.json"
+
+# Wait for OpenBao to be reachable (may be sealed or uninitialized)
 max_attempts=30
 attempt=0
 while [ $attempt -lt $max_attempts ]; do
-  if curl -s -f "$BAO_ADDR/v1/sys/health" > /dev/null 2>&1; then
-    echo "OpenBao is ready"
+  health=$(curl -s "$BAO_ADDR/v1/sys/health?standbyok=true&sealedok=true&uninitok=true" 2>/dev/null || echo "")
+  if [ -n "$health" ]; then
+    echo "OpenBao is reachable"
     break
   fi
   attempt=$((attempt + 1))
@@ -18,7 +22,61 @@ while [ $attempt -lt $max_attempts ]; do
 done
 
 if [ $attempt -eq $max_attempts ]; then
-  echo "OpenBao failed to become ready"
+  echo "OpenBao failed to become reachable"
+  exit 1
+fi
+
+# Check initialization status
+init_status=$(curl -s "$BAO_ADDR/v1/sys/init")
+initialized=$(echo "$init_status" | jq -r '.initialized')
+
+if [ "$initialized" = "false" ]; then
+  echo "OpenBao not initialized, initializing..."
+  init_response=$(curl -s -X POST -H "Content-Type: application/json" \
+    -d '{"secret_shares": 1, "secret_threshold": 1}' \
+    "$BAO_ADDR/v1/sys/init")
+
+  # Save keys to file
+  echo "$init_response" > "$KEYS_FILE"
+  chmod 600 "$KEYS_FILE"
+  echo "Initialization complete, keys saved to $KEYS_FILE"
+fi
+
+# Load keys from file
+if [ ! -f "$KEYS_FILE" ]; then
+  echo "ERROR: Keys file not found: $KEYS_FILE"
+  exit 1
+fi
+
+UNSEAL_KEY=$(jq -r '.keys[0]' "$KEYS_FILE")
+export BAO_TOKEN=$(jq -r '.root_token' "$KEYS_FILE")
+
+# Check seal status and unseal if needed
+seal_status=$(curl -s "$BAO_ADDR/v1/sys/seal-status")
+sealed=$(echo "$seal_status" | jq -r '.sealed')
+
+if [ "$sealed" = "true" ]; then
+  echo "OpenBao is sealed, unsealing..."
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"key\": \"$UNSEAL_KEY\"}" \
+    "$BAO_ADDR/v1/sys/unseal" > /dev/null
+  echo "Unsealed"
+fi
+
+# Wait for OpenBao to be ready (unsealed)
+attempt=0
+while [ $attempt -lt $max_attempts ]; do
+  if curl -s -f "$BAO_ADDR/v1/sys/health" > /dev/null 2>&1; then
+    echo "OpenBao is ready"
+    break
+  fi
+  attempt=$((attempt + 1))
+  echo "Waiting for OpenBao to be ready... ($attempt/$max_attempts)"
+  sleep 1
+done
+
+if [ $attempt -eq $max_attempts ]; then
+  echo "OpenBao failed to become ready after unseal"
   exit 1
 fi
 

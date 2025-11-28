@@ -21,6 +21,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -56,6 +57,68 @@ func NewOpenBaoClient(baseURL, token string) (*OpenBaoClient, error) {
 
 	log.Printf("OpenBao client initialized with account persistence")
 	return client, nil
+}
+
+// isAuthError returns true if the response indicates an authentication failure
+func isAuthError(resp *http.Response) bool {
+	return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
+}
+
+// refreshToken re-reads the token from environment variable or keys file
+func (c *OpenBaoClient) refreshToken() error {
+	token := os.Getenv("BAO_TOKEN")
+	if token == "" {
+		// Try to read from keys file
+		keysFile := os.Getenv("BAO_KEYS_FILE")
+		if keysFile == "" {
+			return fmt.Errorf("BAO_TOKEN not set and BAO_KEYS_FILE not specified")
+		}
+		data, err := os.ReadFile(keysFile)
+		if err != nil {
+			return fmt.Errorf("failed to read keys file: %w", err)
+		}
+		var keys struct {
+			RootToken string `json:"root_token"`
+		}
+		if err := json.Unmarshal(data, &keys); err != nil {
+			return fmt.Errorf("failed to parse keys file: %w", err)
+		}
+		if keys.RootToken == "" {
+			return fmt.Errorf("root_token not found in keys file")
+		}
+		token = keys.RootToken
+	}
+	c.token = token
+	return nil
+}
+
+// doWithRetry executes an HTTP request with automatic retry on auth failures
+func (c *OpenBaoClient) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	const maxRetries = 2
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		reqCopy := req.Clone(ctx)
+		reqCopy.Header.Set("X-Vault-Token", c.token)
+
+		resp, err := c.httpClient.Do(reqCopy)
+		if err != nil {
+			return nil, err
+		}
+
+		if !isAuthError(resp) {
+			return resp, nil
+		}
+
+		resp.Body.Close()
+		log.Printf("Auth error (attempt %d/%d), refreshing token and clearing cache", attempt+1, maxRetries+1)
+
+		if err := c.refreshToken(); err != nil {
+			return nil, fmt.Errorf("token refresh failed: %w", err)
+		}
+		c.accountManager.ClearAccounts()
+	}
+
+	return nil, fmt.Errorf("auth failed after %d retries", maxRetries+1)
 }
 
 // ensureACMEAccount ensures an ACME account exists for the given PKI path
@@ -113,6 +176,30 @@ func (c *OpenBaoClient) CreateACMEOrder(ctx context.Context, req *CertRequest) (
 	}
 	pkiPath := usageConfig.GetACMEPath()
 
+	// Retry loop for ACME account recovery
+	const maxRetries = 2
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		order, err := c.createACMEOrderOnce(ctx, pkiPath, req.PermanentIdentifier)
+		if err == nil {
+			return order, nil
+		}
+
+		// Check if this is an account-not-found error
+		if strings.Contains(err.Error(), "accountDoesNotExist") || strings.Contains(err.Error(), "account not found") {
+			log.Printf("ACME account not found (attempt %d/%d), re-registering...", attempt+1, maxRetries+1)
+			if clearErr := c.accountManager.ClearAccountURL(pkiPath); clearErr != nil {
+				log.Printf("Warning: failed to clear account URL: %v", clearErr)
+			}
+			continue
+		}
+
+		return nil, err
+	}
+
+	return nil, fmt.Errorf("ACME order creation failed after %d retries", maxRetries+1)
+}
+
+func (c *OpenBaoClient) createACMEOrderOnce(ctx context.Context, pkiPath, permanentIdentifier string) (*ACMEOrder, error) {
 	// Ensure we have an account for this PKI
 	account, err := c.ensureACMEAccount(pkiPath)
 	if err != nil {
@@ -126,7 +213,7 @@ func (c *OpenBaoClient) CreateACMEOrder(ctx context.Context, req *CertRequest) (
 
 	payload := map[string]interface{}{
 		"identifiers": []map[string]string{
-			{"type": "permanent-identifier", "value": req.PermanentIdentifier},
+			{"type": "permanent-identifier", "value": permanentIdentifier},
 		},
 	}
 	payloadBytes, _ := json.Marshal(payload)
@@ -366,10 +453,9 @@ func (c *OpenBaoClient) SignLAKCertificate(
 	if err != nil {
 		return "", "", err
 	}
-	req.Header.Set("X-Vault-Token", c.token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(ctx, req)
 	if err != nil {
 		return "", "", err
 	}
@@ -394,9 +480,8 @@ func (c *OpenBaoClient) SignLAKCertificate(
 
 	rootCAURL := fmt.Sprintf("%s/v1/pki-ak/cert/ca", c.baseURL)
 	rootReq, _ := http.NewRequestWithContext(ctx, "GET", rootCAURL, nil)
-	rootReq.Header.Set("X-Vault-Token", c.token)
 
-	rootResp, err := c.httpClient.Do(rootReq)
+	rootResp, err := c.doWithRetry(ctx, rootReq)
 	if err != nil {
 		return "", "", err
 	}
@@ -581,9 +666,8 @@ func pemToBase64URL(pemData string) (string, error) {
 func (c *OpenBaoClient) IsTPMEnrolled(ctx context.Context, permanentID string) (bool, error) {
 	listURL := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots?list=true", c.baseURL)
 	req, _ := http.NewRequestWithContext(ctx, "GET", listURL, nil)
-	req.Header.Set("X-Vault-Token", c.token)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(ctx, req)
 	if err != nil {
 		return false, err
 	}

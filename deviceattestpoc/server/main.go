@@ -20,6 +20,27 @@ import (
 	"google.golang.org/grpc"
 )
 
+// readTokenFromKeysFile reads the root token from the OpenBao keys file
+func readTokenFromKeysFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read keys file: %w", err)
+	}
+
+	var keys struct {
+		RootToken string `json:"root_token"`
+	}
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return "", fmt.Errorf("failed to parse keys file: %w", err)
+	}
+
+	if keys.RootToken == "" {
+		return "", fmt.Errorf("root_token not found in keys file")
+	}
+
+	return keys.RootToken, nil
+}
+
 type Server struct {
 	pb.UnimplementedCertificateServiceServer
 	openbaoClient      *OpenBaoClient
@@ -367,7 +388,17 @@ func main() {
 
 	baoToken := os.Getenv("BAO_TOKEN")
 	if baoToken == "" {
-		log.Fatal("BAO_TOKEN not set")
+		// Try to read from keys file
+		keysFile := os.Getenv("BAO_KEYS_FILE")
+		if keysFile != "" {
+			token, err := readTokenFromKeysFile(keysFile)
+			if err != nil {
+				log.Fatalf("Failed to read token from keys file: %v", err)
+			}
+			baoToken = token
+		} else {
+			log.Fatal("BAO_TOKEN not set and BAO_KEYS_FILE not specified")
+		}
 	}
 
 	log.Printf("Starting server on port %s", port)

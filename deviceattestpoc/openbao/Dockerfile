@@ -24,13 +24,30 @@ RUN apk add --no-cache bash curl jq ca-certificates
 # Copy OpenBao binary from builder
 COPY --from=builder /bao /bin/bao
 
-# Create data directory
-RUN mkdir -p /openbao/data
+# Create data and config directories
+RUN mkdir -p /openbao/data /openbao/config
+
+# Create configuration file inline (avoids .dockerignore issue)
+RUN cat > /openbao/config/config.hcl << 'EOF'
+# OpenBao configuration for persistent mode
+storage "file" {
+  path = "/openbao/data"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_disable = true
+}
+
+disable_mlock = true
+api_addr = "http://openbao:8200"
+ui = false
+EOF
 
 WORKDIR /openbao
 
 # Expose OpenBao port
 EXPOSE 8200
 
-# Default command runs OpenBao in dev mode
-CMD ["bao", "server", "-dev", "-dev-root-token-id=root", "-dev-listen-address=0.0.0.0:8200"]
+# Run OpenBao in server mode with config file
+CMD ["bao", "server", "-config=/openbao/config/config.hcl"]

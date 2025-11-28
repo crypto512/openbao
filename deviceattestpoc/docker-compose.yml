@@ -32,14 +32,13 @@ services:
     ports:
       - "8200:8200"
     environment:
-      - BAO_DEV_ROOT_TOKEN_ID=root
-      - BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200
       - BAO_LOG_LEVEL=debug
     volumes:
       - ./scripts:/scripts:ro
       - openbao-data:/openbao/data
     healthcheck:
-      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8200/v1/sys/health"]
+      # Check if sealed (501) or unsealed (200) - both mean server is running
+      test: ["CMD", "sh", "-c", "wget -q -O /dev/null http://127.0.0.1:8200/v1/sys/health || wget -q -O /dev/null http://127.0.0.1:8200/v1/sys/health?standbyok=true&sealedok=true&uninitok=true"]
       interval: 3s
       timeout: 2s
       retries: 10
@@ -58,9 +57,9 @@ services:
         condition: service_healthy
     environment:
       - BAO_ADDR=http://openbao:8200
-      - BAO_TOKEN=root
     volumes:
       - ./scripts:/scripts:ro
+      - openbao-data:/data
     command: /scripts/init-openbao.sh
     networks:
       - attestation-net
@@ -79,12 +78,13 @@ services:
         condition: service_completed_successfully
     environment:
       - BAO_ADDR=http://openbao:8200
-      - BAO_TOKEN=root
       - GRPC_PORT=50051
       - LOG_LEVEL=debug
+      - BAO_KEYS_FILE=/openbao-data/openbao-keys.json
     volumes:
       - ./ca:/ca:ro
       - server-acme-accounts:/data/acme-accounts
+      - openbao-data:/openbao-data:ro
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "50051"]
       interval: 3s

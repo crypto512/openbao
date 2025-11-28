@@ -290,3 +290,26 @@ func (m *ACMEAccountManager) loadAccounts() error {
 
 	return nil
 }
+
+// ClearAccounts removes all cached accounts (for use when OpenBao restarts)
+func (m *ACMEAccountManager) ClearAccounts() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.accounts = make(map[string]*ACMEAccount)
+	log.Printf("ACME account cache cleared")
+}
+
+// ClearAccountURL clears the account URL for a PKI path (for re-registration)
+func (m *ACMEAccountManager) ClearAccountURL(pkiPath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	account, ok := m.accounts[pkiPath]
+	if !ok {
+		return nil
+	}
+
+	account.AccountURL = ""
+	log.Printf("Cleared account URL for %s (will re-register)", pkiPath)
+	return m.saveAccount(account)
+}
