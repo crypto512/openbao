@@ -111,11 +111,9 @@ func (ws *WebServer) handleAddDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	autoApprove, _ := ws.db.GetAutoApprove()
-	status := db.StatusPendingApproval
-	if autoApprove {
-		status = db.StatusEnrolled
-	}
+	// Manual device addition via web UI starts as registered
+	// Device must connect via da-init to become provisioned
+	status := db.StatusRegistered
 
 	device, err := ws.db.CreateDevice(fingerprint, fingerprint[:min(16, len(fingerprint))], description, status)
 	if err != nil {
@@ -124,7 +122,7 @@ func (ws *WebServer) handleAddDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ws.db.CreateAuditEntry(db.EventDeviceEnrolled, &device.ID, fingerprint, "Manual enrollment via web UI", r.RemoteAddr, true)
+	ws.db.CreateAuditEntry(db.EventDeviceAdded, &device.ID, fingerprint, "Device registered via web UI", r.RemoteAddr, true)
 	ws.sseHub.BroadcastAll()
 
 	ws.handleListDevices(w, r)
@@ -157,7 +155,7 @@ func (ws *WebServer) handleDeleteDevice(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleApproveDevice approves a pending device
+// handleApproveDevice approves a registered device (transitions to provisioned)
 func (ws *WebServer) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -172,18 +170,18 @@ func (ws *WebServer) handleApproveDevice(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if device.Status != db.StatusPendingApproval {
-		http.Error(w, "Device is not pending approval", http.StatusBadRequest)
+	if device.Status != db.StatusRegistered {
+		http.Error(w, "Device is not in registered state", http.StatusBadRequest)
 		return
 	}
 
-	if err := ws.db.UpdateDeviceStatus(id, db.StatusEnrolled); err != nil {
+	if err := ws.db.UpdateDeviceStatus(id, db.StatusProvisioned); err != nil {
 		log.Printf("Failed to approve device: %v", err)
 		http.Error(w, "Failed to approve device", http.StatusInternalServerError)
 		return
 	}
 
-	ws.db.CreateAuditEntry(db.EventDeviceApproved, &id, device.EKHash, "Approved via web UI", r.RemoteAddr, true)
+	ws.db.CreateAuditEntry(db.EventDeviceApproved, &id, device.EKHash, "Device approved and provisioned via web UI", r.RemoteAddr, true)
 	ws.sseHub.BroadcastAll()
 
 	ws.handleListDevices(w, r)

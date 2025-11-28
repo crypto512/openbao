@@ -16,21 +16,36 @@
         <div class="stat-value">{{.Status.Total}}</div>
         <div class="stat-label">Total Devices</div>
     </div>
-    <div class="stat {{if gt .Status.PendingApproval 0}}stat-warning{{end}}">
-        <div class="stat-value">{{.Status.PendingApproval}}</div>
-        <div class="stat-label">Pending Approval</div>
+    <div class="stat {{if gt .Status.Registered 0}}stat-secondary{{end}}">
+        <div class="stat-value">{{.Status.Registered}}</div>
+        <div class="stat-label">Registered</div>
+    </div>
+    <div class="stat {{if gt .Status.Provisioned 0}}stat-warning{{end}}">
+        <div class="stat-value">{{.Status.Provisioned}}</div>
+        <div class="stat-label">Provisioned</div>
+    </div>
+    <div class="stat {{if gt .Status.Enrolled 0}}stat-info{{end}}">
+        <div class="stat-value">{{.Status.Enrolled}}</div>
+        <div class="stat-label">Enrolled</div>
     </div>
     <div class="stat stat-success">
-        <div class="stat-value">{{.Status.AgentCertIssued}}</div>
-        <div class="stat-label">Fully Provisioned</div>
+        <div class="stat-value">{{.Status.Trusted}}</div>
+        <div class="stat-label">Trusted</div>
     </div>
-    <div class="stat {{if gt .Status.ExpiringSoon 0}}stat-warning{{end}}">
-        <div class="stat-value">{{.Status.ExpiringSoon}}</div>
-        <div class="stat-label">Expiring Soon (7d)</div>
-    </div>
-    <div class="stat {{if gt .Status.Expired 0}}stat-danger{{end}}">
-        <div class="stat-value">{{.Status.Expired}}</div>
-        <div class="stat-label">Expired</div>
+</div>
+
+<!-- Certificate Status -->
+<div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--gray-200);">
+    <h3 style="font-size: 0.875rem; font-weight: 600; color: var(--gray-500); margin-bottom: 12px;">Certificate Status</h3>
+    <div class="stats-grid">
+        <div class="stat {{if gt .Status.ExpiringSoon 0}}stat-warning{{end}}">
+            <div class="stat-value">{{.Status.ExpiringSoon}}</div>
+            <div class="stat-label">Expiring Soon (7d)</div>
+        </div>
+        <div class="stat {{if gt .Status.Expired 0}}stat-danger{{end}}">
+            <div class="stat-value">{{.Status.Expired}}</div>
+            <div class="stat-label">Expired</div>
+        </div>
     </div>
 </div>
 
@@ -40,7 +55,7 @@
     <div class="stats-grid">
         <div class="stat">
             <div class="stat-value">{{.Status.EnrollmentsToday}}</div>
-            <div class="stat-label">Enrollments</div>
+            <div class="stat-label">Provisioned</div>
         </div>
         <div class="stat stat-success">
             <div class="stat-value">{{.Status.CertsIssuedToday}}</div>
@@ -48,7 +63,7 @@
         </div>
         <div class="stat {{if gt .Status.FailedToday 0}}stat-danger{{end}}">
             <div class="stat-value">{{.Status.FailedToday}}</div>
-            <div class="stat-label">Failed Attempts</div>
+            <div class="stat-label">Failed</div>
         </div>
     </div>
 </div>

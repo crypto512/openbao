@@ -10,6 +10,7 @@ import (
 type AuditEventType string
 
 const (
+	EventDeviceAdded      AuditEventType = "device_added"
 	EventDeviceEnrolled   AuditEventType = "device_enrolled"
 	EventDeviceApproved   AuditEventType = "device_approved"
 	EventDeviceDeleted    AuditEventType = "device_deleted"

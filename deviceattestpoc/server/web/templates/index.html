@@ -39,13 +39,13 @@
             <span>Auto-approve new devices</span>
         </label>
         <p style="font-size: 0.875rem; color: var(--gray-500); margin-top: 8px;">
-            When enabled, devices are automatically enrolled without manual approval.
+            When enabled, devices are automatically provisioned without manual approval.
         </p>
     </div>
 
     <!-- Device List -->
     <div class="card">
-        <h2>Enrolled Devices</h2>
+        <h2>Devices</h2>
         <div id="device-list" hx-get="/api/devices" hx-trigger="sse:device-update">
             {{template "device_list.html" .Devices}}
         </div>

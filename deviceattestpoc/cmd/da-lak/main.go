@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	pb "github.com/openbao/openbao/deviceattestpoc/proto"
@@ -96,7 +97,29 @@ func run() error {
 	if enrollResp.Status == "error" {
 		return fmt.Errorf("TPM enrollment failed: %s", enrollResp.Error)
 	}
-	log.Printf("TPM enrolled: %s", enrollResp.PermanentIdentifier)
+	log.Printf("TPM registered: %s", enrollResp.PermanentIdentifier)
+
+	// Check if device needs approval
+	if enrollResp.PendingApproval {
+		tpmClient.Close() // Close TPM before exiting to avoid handle leak
+		conn.Close()
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "════════════════════════════════════════════════════════════")
+		fmt.Fprintln(os.Stderr, "  DEVICE PENDING APPROVAL")
+		fmt.Fprintln(os.Stderr, "════════════════════════════════════════════════════════════")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  This device has been registered but requires admin approval")
+		fmt.Fprintln(os.Stderr, "  before it can proceed with provisioning.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "  Permanent ID: %s\n", enrollResp.PermanentIdentifier)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  Next steps:")
+		fmt.Fprintln(os.Stderr, "  1. Ask your administrator to approve this device")
+		fmt.Fprintln(os.Stderr, "  2. Run 'da-init' again after approval")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "════════════════════════════════════════════════════════════")
+		os.Exit(2) // Exit code 2 indicates pending approval
+	}
 
 	// Get AK activation data
 	log.Printf("Requesting credential challenge...")

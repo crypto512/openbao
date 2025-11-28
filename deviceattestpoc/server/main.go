@@ -204,8 +204,16 @@ func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*
 
 	existingDevice, _ := s.db.GetDeviceByEKHash(ekHash)
 	if existingDevice != nil {
-		s.db.UpdateLastSeen(ekHash)
-		log.Printf("TPM already enrolled: %s", ekHash)
+		// Device already exists - update status to provisioned if it was only registered
+		if existingDevice.Status == db.StatusRegistered {
+			s.db.UpdateDeviceStatusByEKHash(ekHash, db.StatusProvisioned)
+			s.db.CreateAuditEntry(db.EventDeviceEnrolled, &existingDevice.ID, ekHash, "Device provisioned via da-init", getClientIP(ctx), true)
+			s.sseHub.BroadcastAll()
+			log.Printf("Device provisioned: %s (was registered)", ekHash)
+		} else {
+			s.db.UpdateLastSeen(ekHash)
+			log.Printf("Device already provisioned: %s", ekHash)
+		}
 		return &pb.EnrollmentResponse{
 			Status:              "success",
 			PermanentIdentifier: ekHash,
@@ -213,9 +221,9 @@ func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*
 	}
 
 	autoApprove, _ := s.db.GetAutoApprove()
-	status := db.StatusPendingApproval
+	status := db.StatusRegistered
 	if autoApprove {
-		status = db.StatusEnrolled
+		status = db.StatusProvisioned
 	}
 
 	fingerprint := ekHash
@@ -226,16 +234,18 @@ func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*
 	device, err := s.db.CreateDevice(ekHash, fingerprint, req.DeviceDescription, status)
 	if err != nil {
 		log.Printf("Failed to create device: %v", err)
-		return &pb.EnrollmentResponse{Status: "error", Error: "failed to enroll device"}, nil
+		return &pb.EnrollmentResponse{Status: "error", Error: "failed to provision device"}, nil
 	}
 
-	s.db.CreateAuditEntry(db.EventDeviceEnrolled, &device.ID, ekHash, fmt.Sprintf("Status: %s", status), getClientIP(ctx), true)
+	s.db.CreateAuditEntry(db.EventDeviceEnrolled, &device.ID, ekHash, fmt.Sprintf("Device provisioned (auto-approve: %v)", autoApprove), getClientIP(ctx), true)
 	s.sseHub.BroadcastAll()
 
-	log.Printf("TPM enrolled: %s (status: %s)", ekHash, status)
+	pendingApproval := status == db.StatusRegistered
+	log.Printf("Device provisioned: %s (status: %s, pending_approval: %v)", ekHash, status, pendingApproval)
 	return &pb.EnrollmentResponse{
 		Status:              "success",
 		PermanentIdentifier: ekHash,
+		PendingApproval:     pendingApproval,
 	}, nil
 }
 
@@ -244,7 +254,7 @@ func (s *Server) ProvisionLAK(ctx context.Context, req *pb.ProvisionLAKRequest) 
 
 	allowed, err := s.db.IsDeviceAllowed(req.PermanentIdentifier)
 	if err != nil || !allowed {
-		return &pb.ProvisionLAKResponse{Status: "error", Error: "device not enrolled or pending approval"}, nil
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "device not registered or provisioned"}, nil
 	}
 
 	var akParams attest.AttestationParameters

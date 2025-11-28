@@ -110,7 +110,7 @@ Per TCG TPM 2.0 Keys for Device Identity and Attestation:
       |------------------------------>|                           |
       |                               | Validate EK cert          |
       |                               | against manufacturer CAs  |
-      |<-- enrolled ------------------|                           |
+      |<-- provisioned --------------|                           |
       |                               |                           |
       |  2. ProvisionLAK              |                           |
       |     (AK public, EK public)    |                           |
@@ -353,7 +353,11 @@ The server provides an HTMX-based web interface for device management:
 | **Audit Log** | Full history of enrollment and certificate operations |
 | **Real-time Updates** | SSE-based live updates when device state changes |
 
-Device status progression: `pending_approval` → `enrolled` → `lak_issued` → `agent_cert_issued`
+Device status progression:
+- `registered` → Admin pre-registered device fingerprint (awaiting device connection)
+- `provisioned` → Device connected via da-init (ready for LAK enrollment)
+- `enrolled` → LAK certificate issued (device identity established)
+- `trusted` → Agent certificate issued (fully trusted, can request usage certificates)
 
 Certificate validity icons:
 - 🟢 Green: Valid (>7 days remaining)

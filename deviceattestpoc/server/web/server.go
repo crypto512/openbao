@@ -66,13 +66,13 @@ func NewWebServer(cfg *Config) (*WebServer, error) {
 		},
 		"statusBadgeClass": func(status string) string {
 			switch status {
-			case "pending_approval":
+			case "registered":
+				return "badge-secondary"
+			case "provisioned":
 				return "badge-warning"
 			case "enrolled":
 				return "badge-info"
-			case "lak_issued":
-				return "badge-primary"
-			case "agent_cert_issued":
+			case "trusted":
 				return "badge-success"
 			default:
 				return "badge-secondary"
@@ -80,29 +80,30 @@ func NewWebServer(cfg *Config) (*WebServer, error) {
 		},
 		"statusLabel": func(status string) string {
 			switch status {
-			case "pending_approval":
-				return "Pending"
+			case "registered":
+				return "Registered"
+			case "provisioned":
+				return "Provisioned"
 			case "enrolled":
 				return "Enrolled"
-			case "lak_issued":
-				return "LAK Issued"
-			case "agent_cert_issued":
-				return "Agent Cert"
+			case "trusted":
+				return "Trusted"
 			default:
 				return status
 			}
 		},
 		"eventLabel": func(eventType string) string {
 			labels := map[string]string{
-				"device_enrolled":    "Enrolled",
-				"device_approved":    "Approved",
-				"device_deleted":     "Deleted",
-				"lak_issued":         "LAK Issued",
-				"agent_cert_issued":  "Agent Cert",
-				"usage_cert_issued":  "Usage Cert",
-				"enrollment_failed":  "Enroll Failed",
-				"lak_failed":         "LAK Failed",
-				"cert_revoked":       "Revoked",
+				"device_added":       "Device Registered",
+				"device_enrolled":    "Device Provisioned",
+				"device_approved":    "Device Approved",
+				"device_deleted":     "Device Deleted",
+				"lak_issued":         "Device Enrolled (LAK)",
+				"agent_cert_issued":  "Device Trusted (Agent)",
+				"usage_cert_issued":  "Usage Cert Issued",
+				"enrollment_failed":  "Provisioning Failed",
+				"lak_failed":         "Enrollment Failed",
+				"cert_revoked":       "Certificate Revoked",
 			}
 			if label, ok := labels[eventType]; ok {
 				return label

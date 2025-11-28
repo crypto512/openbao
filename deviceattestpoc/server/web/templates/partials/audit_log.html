@@ -1,29 +1,47 @@
 {{define "audit_log.html"}}
 {{if .}}
-<div>
-    {{range .}}
-    <div class="audit-entry">
-        <div>
-            <span class="audit-event {{if .Success}}audit-success{{else}}audit-failure{{end}}">
-                {{eventLabel (printf "%s" .EventType)}}
-            </span>
-            {{if .EKHash}}
-            <span class="mono" style="font-size: 0.75rem; color: var(--gray-500); margin-left: 8px;">
-                {{truncate .EKHash 12}}
-            </span>
-            {{end}}
-            {{if .Details}}
-            <span style="font-size: 0.75rem; color: var(--gray-500); margin-left: 8px;">
-                — {{.Details}}
-            </span>
-            {{end}}
-        </div>
-        <div class="audit-time">
-            {{.Timestamp.Format "Jan 2, 15:04:05"}}
-        </div>
-    </div>
-    {{end}}
-</div>
+<table class="audit-table">
+    <thead>
+        <tr>
+            <th style="width: 180px;">Event</th>
+            <th style="width: 140px;">Device</th>
+            <th>Details</th>
+            <th style="width: 100px;">Client IP</th>
+            <th style="width: 140px;">Time</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .}}
+        <tr class="{{if .Success}}audit-success{{else}}audit-failure{{end}}">
+            <td>
+                <span class="audit-event-badge {{if .Success}}badge-success{{else}}badge-danger{{end}}">
+                    {{eventLabel (printf "%s" .EventType)}}
+                </span>
+            </td>
+            <td>
+                {{if .EKHash}}
+                <code class="mono" style="font-size: 0.8rem;">{{truncate .EKHash 16}}</code>
+                {{else}}
+                <span style="color: var(--gray-400);">—</span>
+                {{end}}
+            </td>
+            <td style="font-size: 0.875rem; color: var(--gray-600);">
+                {{if .Details}}{{.Details}}{{else}}—{{end}}
+            </td>
+            <td>
+                {{if .ClientIP}}
+                <code style="font-size: 0.75rem;">{{.ClientIP}}</code>
+                {{else}}
+                <span style="color: var(--gray-400);">—</span>
+                {{end}}
+            </td>
+            <td style="font-size: 0.8rem; color: var(--gray-500);">
+                {{.Timestamp.Format "Jan 2, 15:04:05"}}
+            </td>
+        </tr>
+        {{end}}
+    </tbody>
+</table>
 {{else}}
 <div class="empty-state" style="padding: 20px;">
     <p style="font-size: 0.875rem;">No activity recorded yet.</p>

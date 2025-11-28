@@ -128,6 +128,7 @@
         .badge-primary { background: #e0e7ff; color: #3730a3; }
         .badge-success { background: #dcfce7; color: #166534; }
         .badge-secondary { background: var(--gray-100); color: var(--gray-700); }
+        .badge-danger { background: #fee2e2; color: #991b1b; }
 
         .cert-icon {
             display: inline-block;
@@ -235,22 +236,46 @@
             font-size: 0.875rem;
         }
 
-        .audit-entry {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid var(--gray-100);
+        .audit-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
         }
-        .audit-entry:last-child { border-bottom: none; }
-        .audit-time {
+        .audit-table th {
+            background: var(--gray-50);
+            font-weight: 600;
+            color: var(--gray-600);
             font-size: 0.75rem;
-            color: var(--gray-500);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 2px solid var(--gray-200);
         }
-        .audit-event {
+        .audit-table td {
+            padding: 12px;
+            border-bottom: 1px solid var(--gray-100);
+            vertical-align: middle;
+        }
+        .audit-table tbody tr:hover {
+            background: var(--gray-50);
+        }
+        .audit-table tr.audit-failure {
+            background: #fef2f2;
+        }
+        .audit-table tr.audit-failure:hover {
+            background: #fee2e2;
+        }
+        .audit-event-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.8rem;
             font-weight: 500;
+            white-space: nowrap;
         }
-        .audit-success { color: var(--success); }
-        .audit-failure { color: var(--danger); }
+        .stat-info .stat-value { color: #2563eb; }
+        .stat-secondary .stat-value { color: var(--gray-500); }
 
         .empty-state {
             text-align: center;

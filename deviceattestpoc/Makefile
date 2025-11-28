@@ -75,8 +75,8 @@ clean-pki: clean-client
 	@echo "Cleaning OpenBao PKI state..."
 	@docker compose rm -sf openbao init server 2>/dev/null || true
 	@docker ps -a --filter "name=deviceattestpoc-server-run" -q | xargs -r docker rm -f 2>/dev/null || true
-	@docker volume rm deviceattestpoc_openbao-data deviceattestpoc_server-acme-accounts 2>/dev/null || true
-	@echo "✓ PKI state cleaned (OpenBao data, ACME accounts removed)"
+	@docker volume rm deviceattestpoc_openbao-data deviceattestpoc_server-acme-accounts deviceattestpoc_server-db 2>/dev/null || true
+	@echo "✓ PKI state cleaned (OpenBao data, server DB, ACME accounts removed)"
 	@echo "  Note: SWTPM state preserved (EK unchanged)"
 
 # Clean SWTPM state (requires clean-client first because EK changes)

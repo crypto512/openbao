@@ -18,12 +18,12 @@
     </td>
     <td>
         <div class="actions">
-            {{if eq (printf "%s" .Status) "pending_approval"}}
+            {{if eq (printf "%s" .Status) "registered"}}
             <button class="btn btn-primary btn-sm"
                     hx-post="/api/devices/{{.ID}}/approve"
                     hx-target="#device-list"
                     hx-swap="innerHTML">
-                Approve
+                Provision
             </button>
             {{end}}
             <button class="btn btn-danger btn-sm"

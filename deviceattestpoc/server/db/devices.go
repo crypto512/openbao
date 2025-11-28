@@ -10,10 +10,10 @@ import (
 type DeviceStatus string
 
 const (
-	StatusPendingApproval DeviceStatus = "pending_approval"
-	StatusEnrolled        DeviceStatus = "enrolled"
-	StatusLAKIssued       DeviceStatus = "lak_issued"
-	StatusAgentCertIssued DeviceStatus = "agent_cert_issued"
+	StatusRegistered  DeviceStatus = "registered"  // Admin pre-registered fingerprint
+	StatusProvisioned DeviceStatus = "provisioned" // Device connected via da-init
+	StatusEnrolled    DeviceStatus = "enrolled"    // LAK issued
+	StatusTrusted     DeviceStatus = "trusted"     // Agent cert issued
 )
 
 // Device represents an enrolled device
@@ -36,10 +36,10 @@ type Device struct {
 // DeviceCounts holds summary statistics
 type DeviceCounts struct {
 	Total            int
-	PendingApproval  int
-	Enrolled         int
-	LAKIssued        int
-	AgentCertIssued  int
+	Registered       int // Admin pre-registered
+	Provisioned      int // Device connected
+	Enrolled         int // LAK issued
+	Trusted          int // Agent cert issued
 	ExpiringSoon     int // Certs expiring within 7 days
 	Expired          int
 	EnrollmentsToday int
@@ -54,7 +54,7 @@ func (db *DB) CreateDevice(ekHash, fingerprint, description string, status Devic
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	var enrolledAt *string
-	if status == StatusEnrolled {
+	if status == StatusProvisioned {
 		enrolledAt = &now
 	}
 
@@ -127,8 +127,8 @@ func (db *DB) GetDeviceByFingerprint(fingerprint string) (*Device, error) {
 	return scanDevice(row)
 }
 
-// IsDeviceAllowed checks if a device with the given EK hash is enrolled (not pending)
-// This replaces the in-memory allowedEKHashes map lookup
+// IsDeviceAllowed checks if a device with the given EK hash is provisioned or beyond
+// Registered devices (pending approval) are NOT allowed to proceed with LAK provisioning
 func (db *DB) IsDeviceAllowed(ekHash string) (bool, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -142,8 +142,8 @@ func (db *DB) IsDeviceAllowed(ekHash string) (bool, error) {
 		return false, fmt.Errorf("failed to check device: %w", err)
 	}
 
-	// Device is allowed if it's not pending approval
-	return status != string(StatusPendingApproval), nil
+	// Device is allowed only if provisioned or beyond (not registered/pending approval)
+	return status == string(StatusProvisioned) || status == string(StatusEnrolled) || status == string(StatusTrusted), nil
 }
 
 // ListDevices returns all devices ordered by creation date
@@ -182,7 +182,7 @@ func (db *DB) UpdateDeviceStatus(id int64, status DeviceStatus) error {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	var enrolledAt *string
-	if status == StatusEnrolled {
+	if status == StatusProvisioned {
 		enrolledAt = &now
 	}
 
@@ -201,7 +201,7 @@ func (db *DB) UpdateDeviceStatusByEKHash(ekHash string, status DeviceStatus) err
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	var enrolledAt *string
-	if status == StatusEnrolled {
+	if status == StatusProvisioned {
 		enrolledAt = &now
 	}
 
@@ -224,7 +224,7 @@ func (db *DB) UpdateLAKCertValidity(ekHash string, notBefore, notAfter time.Time
 			lak_not_before = ?, lak_not_after = ?,
 			status = ?, updated_at = ?
 		WHERE ek_hash = ?
-	`, notBefore.Format(time.RFC3339), notAfter.Format(time.RFC3339), string(StatusLAKIssued), now, ekHash)
+	`, notBefore.Format(time.RFC3339), notAfter.Format(time.RFC3339), string(StatusEnrolled), now, ekHash)
 
 	return err
 }
@@ -240,7 +240,7 @@ func (db *DB) UpdateAgentCertValidity(ekHash string, notBefore, notAfter time.Ti
 			agent_cert_not_before = ?, agent_cert_not_after = ?,
 			status = ?, updated_at = ?
 		WHERE ek_hash = ?
-	`, notBefore.Format(time.RFC3339), notAfter.Format(time.RFC3339), string(StatusAgentCertIssued), now, ekHash)
+	`, notBefore.Format(time.RFC3339), notAfter.Format(time.RFC3339), string(StatusTrusted), now, ekHash)
 
 	return err
 }
@@ -279,10 +279,10 @@ func (db *DB) GetDeviceCounts() (*DeviceCounts, error) {
 	db.QueryRow("SELECT COUNT(*) FROM devices").Scan(&counts.Total)
 
 	// Status counts
-	db.QueryRow("SELECT COUNT(*) FROM devices WHERE status = ?", string(StatusPendingApproval)).Scan(&counts.PendingApproval)
+	db.QueryRow("SELECT COUNT(*) FROM devices WHERE status = ?", string(StatusRegistered)).Scan(&counts.Registered)
+	db.QueryRow("SELECT COUNT(*) FROM devices WHERE status = ?", string(StatusProvisioned)).Scan(&counts.Provisioned)
 	db.QueryRow("SELECT COUNT(*) FROM devices WHERE status = ?", string(StatusEnrolled)).Scan(&counts.Enrolled)
-	db.QueryRow("SELECT COUNT(*) FROM devices WHERE status = ?", string(StatusLAKIssued)).Scan(&counts.LAKIssued)
-	db.QueryRow("SELECT COUNT(*) FROM devices WHERE status = ?", string(StatusAgentCertIssued)).Scan(&counts.AgentCertIssued)
+	db.QueryRow("SELECT COUNT(*) FROM devices WHERE status = ?", string(StatusTrusted)).Scan(&counts.Trusted)
 
 	// Expiring soon (any cert expiring within 7 days)
 	db.QueryRow(`

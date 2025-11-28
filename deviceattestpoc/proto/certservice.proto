@@ -71,6 +71,7 @@ message EnrollmentResponse {
   string error = 2;
   string details = 3;
   string permanent_identifier = 4;
+  bool pending_approval = 5;  // True if device needs admin approval before LAK provisioning
 }
 
 message ProvisionLAKRequest {
