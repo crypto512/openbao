@@ -30,7 +30,7 @@ The combination ensures:
 | **AK** | Attestation Key - Restricted signing key for TPM2_Certify operations |
 | **LAK** | Local Attestation Key certificate - Binds AK to device identity (TCG term) |
 | **Agent Key** | TPM-bound signing key for agent certificate (attested via ACME) |
-| **Cert Key** | TPM-bound signing key for usage certificates |
+| **Cert Key** | Ephemeral RSA key for usage certificates (generated on demand) |
 | **Permanent ID** | Base64(SHA256(EK public key)) - Stable device identifier |
 
 ## Architecture
@@ -80,21 +80,21 @@ The combination ensures:
 |         |                       +--------+--------+--------+       |
 |         |                       |                 |        |       |
 |         |               +-------+------+  +-------+----+ +-+-----+ |
-|         |               |      AK      |  | Agent Key  | |Cert   | |
-|         |               | (restricted  |  | (flexible  | |Key(s) | |
-|         |               |  signing)    |  |  signing)  | |       | |
-|         |               +-------+------+  +-----+------+ +---+---+ |
-|         |                       |               |             |    |
-|         |  MakeCredential       | TPM2_Certify  |             |    |
-|         +--------+--------------+               |             |    |
-|                  |                              |             |    |
-|                  v                              v             v    |
-|         +--------+--------+            +--------+---+ +------+---+ |
-|         | LAK Certificate |            |Agent Cert  | |Usage Cert| |
-|         | (pki-ak CA)     |            |(pki-agent) | |(pki-usage| |
-|         +-----------------+            +------------+ +----------+ |
+|         |               |      AK      |  | Agent Key  |         |
+|         |               | (restricted  |  | (flexible  |         |
+|         |               |  signing)    |  |  signing)  |         |
+|         |               +-------+------+  +-----+------+         |
+|         |                       |               |                  |
+|         |  MakeCredential       | TPM2_Certify  |                  |
+|         +--------+--------------+               |                  |
+|                  |                              |                  |
+|                  v                              v                  |
+|         +--------+--------+            +--------+---+              |
+|         | LAK Certificate |            |Agent Cert  |  Usage Cert  |
+|         | (pki-ak CA)     |            |(pki-agent) |  (pki-usage) |
+|         +-----------------+            +------------+  [ephemeral] |
 |                                                                    |
-|  Phase 1: TCG Credential   Phase 2: ACME    Phase 3: mTLS         |
+|  Phase 1: TCG Credential   Phase 2: ACME      Phase 3: mTLS       |
 +====================================================================+
 ```
 
@@ -210,15 +210,16 @@ Per draft-acme-device-attest-07:
 
 ### Phase 3: mTLS Certificate Generation (da-gen)
 
-Usage certificates are issued via mTLS authentication with the agent certificate:
+Usage certificates are issued via mTLS authentication with the agent certificate.
+The usage key is a standard RSA key (not TPM-bound) - ephemeral and regenerated on demand:
 
 ```
     CLIENT                         SERVER                      OPENBAO
       |                               |                           |
       | Load agent cert + key blobs   |                           |
       |                               |                           |
-      | Create Cert Key (TPM)         |                           |
-      | Sign CSR with Cert Key        |                           |
+      | Generate RSA key (standard)   |                           |
+      | Sign CSR with RSA key         |                           |
       |                               |                           |
       |  1. IssueCertificate (mTLS)   |                           |
       |     TLS client cert: agent    |                           |
@@ -237,7 +238,7 @@ Usage certificates are issued via mTLS authentication with the agent certificate
       |                               |                           |
       |<-- certificate + chain -------|                           |
       |                               |                           |
-      | Save cert + key blobs locally |                           |
+      | Output: key.pem + cert.pem    |                           |
       |                               |                           |
 ```
 
@@ -282,7 +283,7 @@ make da-gen USAGE=vpn
 make da-gen USAGE=vpn OUTPUT=/path/to/certs
 ```
 Output files (in `./certs/` by default):
-- `vpn-key.blob` - TPM-encrypted key blobs (non-exportable)
+- `vpn-key.pem` - Private key in standard PEM format
 - `vpn-cert.pem` - Signed certificate with full CA chain
 
 ## Make Targets

@@ -4,13 +4,20 @@
 // Usage: da-gen --usage vpn [--server localhost:50051] [--tpm /dev/tpmrm0] [--output ./certs]
 //
 // Output files:
-//   - <usage>-key.blob: TPM key blobs (encrypted, can only be used with this TPM)
+//   - <usage>-key.pem: Private key in standard PEM format (unencrypted)
 //   - <usage>-cert.pem: Certificate with full CA chain (leaf + intermediate + root)
+//
+// Note: Usage keys are ephemeral - generated on demand, not stored in device config.
+// The mTLS authentication still uses the TPM-bound agent certificate.
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log"
@@ -21,12 +28,6 @@ import (
 	pb "github.com/openbao/openbao/deviceattestpoc/proto"
 	"google.golang.org/grpc"
 )
-
-// CertKeyBlobs stores the TPM key blobs for persistence
-type CertKeyBlobs struct {
-	PrivBlob []byte `json:"priv_blob"`
-	PubBlob  []byte `json:"pub_blob"`
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -78,23 +79,32 @@ func run() error {
 	permanentID := tpmClient.GetPermanentID()
 	log.Printf("Permanent ID: %s", permanentID)
 
-	// Create TPM-bound key for this usage certificate
-	log.Printf("Creating TPM-bound signing key...")
-	certKey, err := tpmClient.CreateCertKey()
+	// Generate standard RSA key (not TPM-bound)
+	log.Printf("Generating RSA key...")
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return fmt.Errorf("failed to create TPM key: %w", err)
+		return fmt.Errorf("failed to generate RSA key: %w", err)
 	}
-	defer tpmClient.CloseCertKey(certKey)
 
 	// Build common name with usage prefix
 	commonName := fmt.Sprintf("%s-%s", *usage, permanentID)
 
-	// Generate CSR signed by TPM key
-	log.Printf("Generating CSR (TPM-signed)...")
-	csrPEM, err := tpmClient.SignCSR(certKey, commonName, nil)
-	if err != nil {
-		return fmt.Errorf("failed to generate CSR: %w", err)
+	// Generate CSR signed by the RSA key
+	log.Printf("Generating CSR...")
+	csrTemplate := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName: commonName,
+		},
+		SignatureAlgorithm: x509.SHA256WithRSA,
 	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privateKey)
+	if err != nil {
+		return fmt.Errorf("failed to create CSR: %w", err)
+	}
+	csrPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE REQUEST",
+		Bytes: csrDER,
+	}))
 
 	// Load agent certificate and key for mTLS
 	agentCertPEM := GetAgentCertPEM()
@@ -146,21 +156,16 @@ func run() error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	blobPath := filepath.Join(finalOutputDir, fmt.Sprintf("%s-key.blob", *usage))
+	keyPath := filepath.Join(finalOutputDir, fmt.Sprintf("%s-key.pem", *usage))
 	certPath := filepath.Join(finalOutputDir, fmt.Sprintf("%s-cert.pem", *usage))
 
-	// Save TPM key blobs (encrypted, TPM-bound)
-	privBlob, pubBlob := certKey.GetBlobs()
-	keyBlobs := CertKeyBlobs{
-		PrivBlob: privBlob,
-		PubBlob:  pubBlob,
-	}
-	blobData, err := json.Marshal(keyBlobs)
-	if err != nil {
-		return fmt.Errorf("failed to marshal key blobs: %w", err)
-	}
-	if err := os.WriteFile(blobPath, blobData, 0600); err != nil {
-		return fmt.Errorf("failed to write key blobs: %w", err)
+	// Save private key in PEM format
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	})
+	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+		return fmt.Errorf("failed to write private key: %w", err)
 	}
 
 	// Write certificate with chain
@@ -173,7 +178,7 @@ func run() error {
 	}
 
 	log.Printf("Certificate generated successfully!")
-	log.Printf("  Key blobs: %s (TPM-bound, use with this device only)", blobPath)
+	log.Printf("  Key: %s", keyPath)
 	log.Printf("  Cert: %s", certPath)
 	log.Printf("  CN: %s", commonName)
 	if resp.NotBefore != "" && resp.NotAfter != "" {

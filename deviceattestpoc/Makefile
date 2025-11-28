@@ -129,4 +129,4 @@ endif
 	@docker compose run --rm -v $(abspath $(OUTPUT)):/output client /bin/da-gen --usage $(USAGE) --output /output
 	@echo ""
 	@echo "✓ Certificate generated:"
-	@ls -la $(OUTPUT)/$(USAGE)-cert.pem $(OUTPUT)/$(USAGE)-key.blob 2>/dev/null || echo "  (check $(OUTPUT) for output files)"
+	@ls -la $(OUTPUT)/$(USAGE)-cert.pem $(OUTPUT)/$(USAGE)-key.pem 2>/dev/null || echo "  (check $(OUTPUT) for output files)"
