@@ -300,6 +300,27 @@ func (s *Server) ActivateCredential(ctx context.Context, req *pb.ActivateCredent
 	}, nil
 }
 
+// parseCertificateAuto parses a certificate from raw data, auto-detecting format.
+// For .der files, it parses directly as DER.
+// For .pem and .crt files, it tries PEM first, then falls back to DER.
+func parseCertificateAuto(data []byte, ext string) (*x509.Certificate, error) {
+	ext = strings.ToLower(ext)
+
+	// For .der extension, parse directly as DER
+	if ext == ".der" {
+		return x509.ParseCertificate(data)
+	}
+
+	// For .pem and .crt, try PEM first
+	block, _ := pem.Decode(data)
+	if block != nil {
+		return x509.ParseCertificate(block.Bytes)
+	}
+
+	// PEM decode failed, try DER as fallback
+	return x509.ParseCertificate(data)
+}
+
 func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
 	trustedCAs := make(map[string]*x509.Certificate)
 
@@ -310,8 +331,8 @@ func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
 			return nil
 		}
 
-		if !strings.HasSuffix(strings.ToLower(info.Name()), ".crt") &&
-			!strings.HasSuffix(strings.ToLower(info.Name()), ".pem") {
+		ext := strings.ToLower(filepath.Ext(info.Name()))
+		if ext != ".crt" && ext != ".pem" && ext != ".der" {
 			return nil
 		}
 
@@ -320,12 +341,7 @@ func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
 			return nil
 		}
 
-		block, _ := pem.Decode(certData)
-		if block == nil {
-			return nil
-		}
-
-		cert, err := x509.ParseCertificate(block.Bytes)
+		cert, err := parseCertificateAuto(certData, ext)
 		if err != nil || !cert.IsCA {
 			return nil
 		}
@@ -333,7 +349,7 @@ func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
 		relPath, _ := filepath.Rel(caBasePath, path)
 		caName := strings.TrimSuffix(relPath, filepath.Ext(relPath))
 		trustedCAs[caName] = cert
-		log.Printf("  Loaded CA: %s", caName)
+		log.Printf("  Loaded CA: %s (%s)", caName, ext)
 
 		return nil
 	})
