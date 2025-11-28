@@ -501,6 +501,7 @@ type CertKey struct {
 
 // certKeyTemplate returns the template for a non-restricted signing key
 // This key can sign arbitrary data (like CSRs) unlike the restricted AK
+// Uses scheme=NULL (flexible) to support both RSASSA and RSA-PSS for TLS
 func certKeyTemplate() tpm2.Public {
 	return tpm2.Public{
 		Type:    tpm2.AlgRSA,
@@ -510,8 +511,7 @@ func certKeyTemplate() tpm2.Public {
 			tpm2.FlagSensitiveDataOrigin | tpm2.FlagUserWithAuth,
 		RSAParameters: &tpm2.RSAParams{
 			Sign: &tpm2.SigScheme{
-				Alg:  tpm2.AlgRSASSA,
-				Hash: tpm2.AlgSHA256,
+				Alg: tpm2.AlgNull, // Flexible scheme - allows RSASSA and RSA-PSS
 			},
 			KeyBits: 2048,
 		},
@@ -681,6 +681,7 @@ func (c *TPMClient) GenerateAttestation(certKey *CertKey, keyAuthorization strin
 }
 
 // buildPubArea constructs the TPMT_PUBLIC structure for a cert key
+// This must match the key template (certKeyTemplate) exactly for attestation
 func (c *TPMClient) buildPubArea(certKey *CertKey) ([]byte, error) {
 	buf := new(bytes.Buffer)
 
@@ -701,9 +702,9 @@ func (c *TPMClient) buildPubArea(certKey *CertKey) ([]byte, error) {
 	// RSA Parameters (TPMS_RSA_PARMS)
 	// symmetric = TPM_ALG_NULL
 	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_NULL))
-	// scheme = RSASSA with SHA256
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_RSASSA))
-	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_SHA256))
+	// scheme = TPM_ALG_NULL (flexible, no fixed scheme)
+	// With AlgNull, there's no hash algorithm field - just the algorithm ID
+	binary.Write(buf, binary.BigEndian, uint16(TPM_ALG_NULL))
 	// keyBits
 	binary.Write(buf, binary.BigEndian, uint16(certKey.pubKey.N.BitLen()))
 	// exponent (0 = default 65537)
@@ -826,6 +827,87 @@ func (c *TPMClient) GetPermanentID() string {
 	return c.ekHashB64
 }
 
+// SignWithCertKey signs data using a TPM-bound cert key
+// This is used by tpmCertSigner for mTLS
+func (c *TPMClient) SignWithCertKey(key *CertKey, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if key == nil {
+		return nil, fmt.Errorf("cert key not provided")
+	}
+
+	// Determine hash algorithm
+	var hashAlg tpm2.Algorithm
+	switch opts.HashFunc() {
+	case crypto.SHA256:
+		hashAlg = tpm2.AlgSHA256
+	case crypto.SHA384:
+		hashAlg = tpm2.AlgSHA384
+	case crypto.SHA512:
+		hashAlg = tpm2.AlgSHA512
+	default:
+		return nil, fmt.Errorf("unsupported hash algorithm: %v", opts.HashFunc())
+	}
+
+	// Determine signature algorithm - RSASSA or RSA-PSS based on opts
+	var sigAlg tpm2.Algorithm
+	if _, isPSS := opts.(*rsa.PSSOptions); isPSS {
+		sigAlg = tpm2.AlgRSAPSS
+	} else {
+		sigAlg = tpm2.AlgRSASSA
+	}
+
+	// Sign using TPM
+	sig, err := tpm2.Sign(
+		c.rwc,
+		key.handle,
+		"", // key password
+		digest,
+		nil, // validation ticket (not needed for non-restricted key)
+		&tpm2.SigScheme{
+			Alg:  sigAlg,
+			Hash: hashAlg,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("TPM2_Sign failed: %w", err)
+	}
+
+	// Extract raw signature from TPMT_SIGNATURE
+	if sig.RSA == nil {
+		return nil, fmt.Errorf("expected RSA signature")
+	}
+
+	return sig.RSA.Signature, nil
+}
+
+// NeedsAgentProvisioning returns true if agent certificate is not provisioned
+func (c *TPMClient) NeedsAgentProvisioning() bool {
+	return !AgentBlobsExist()
+}
+
+// GetAgentCertPEM returns the agent certificate PEM
+func GetAgentCertPEM() string {
+	certPEM, _, _, _, exists, _ := LoadAgentBlobs()
+	if !exists {
+		return ""
+	}
+	return certPEM
+}
+
+// GetAgentKeyBlobs returns the agent key blobs for TPM loading
+func GetAgentKeyBlobs() (privBlob, pubBlob []byte, exists bool) {
+	_, privBlob, pubBlob, _, exists, _ = LoadAgentBlobs()
+	return privBlob, pubBlob, exists
+}
+
+// GetAgentCACertPEM returns the agent CA certificate PEM
+func GetAgentCACertPEM() string {
+	_, _, _, caCertPEM, exists, _ := LoadAgentBlobs()
+	if !exists {
+		return ""
+	}
+	return caCertPEM
+}
+
 func (c *TPMClient) GetLAKCertPEM() string {
 	if c.lakCert == nil {
 		return ""
@@ -838,6 +920,15 @@ func (c *TPMClient) GetLAKCertPEM() string {
 
 func (c *TPMClient) GetLAKCACertPEM() string {
 	return c.lakCACertPEM
+}
+
+// CloseAK closes just the AK to free up TPM object slots
+// Call this when AK is no longer needed (e.g., after provisioning checks in da-gen)
+func (c *TPMClient) CloseAK() {
+	if c.ak != nil {
+		c.ak.Close()
+		c.ak = nil
+	}
 }
 
 func (c *TPMClient) Close() error {

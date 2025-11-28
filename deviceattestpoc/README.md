@@ -1,9 +1,10 @@
 # ACME Device Attestation PoC
 
-**Proof of Concept** demonstrating TPM 2.0 device attestation with a two-phase approach:
+**Proof of Concept** demonstrating TPM 2.0 device attestation with a three-phase approach:
 
 1. **TCG Credential Activation** - LAK certificate issuance via MakeCredential/ActivateCredential
-2. **ACME device-attest-01** - TPM-bound certificate generation per draft-acme-device-attest-07
+2. **ACME device-attest-01** - Agent certificate via TPM attestation (hardware-bound identity)
+3. **mTLS Certificate Generation** - Usage certificates issued via mTLS with agent cert
 
 ## Overview
 
@@ -12,12 +13,14 @@ This PoC implements industry standards for hardware-backed device identity:
 | Phase | Standard | Purpose |
 |-------|----------|---------|
 | **LAK Provisioning** | TCG TPM 2.0 Credential Profiles | Establish device identity via Privacy CA |
-| **Certificate Issuance** | draft-acme-device-attest-07 | Issue TPM-bound certificates via ACME |
+| **Agent Certificate** | draft-acme-device-attest-07 | Hardware-bound agent identity via ACME |
+| **Usage Certificates** | mTLS with agent cert | Issue VPN/WiFi/TLS certs (short-lived) |
 
 The combination ensures:
 - Device authenticity proven via EK certificate chain
 - AK-EK binding verified through credential activation
-- Application keys proven non-exportable via TPM2_Certify
+- Agent key proven non-exportable via TPM2_Certify
+- Usage certificates require valid agent mTLS authentication
 
 ### Key Concepts
 
@@ -26,7 +29,8 @@ The combination ensures:
 | **EK** | Endorsement Key - Manufacturer-provisioned, decrypt-only, proves TPM authenticity |
 | **AK** | Attestation Key - Restricted signing key for TPM2_Certify operations |
 | **LAK** | Local Attestation Key certificate - Binds AK to device identity (TCG term) |
-| **Cert Key** | Non-restricted signing key for CSRs, certified by AK |
+| **Agent Key** | TPM-bound signing key for agent certificate (attested via ACME) |
+| **Cert Key** | TPM-bound signing key for usage certificates |
 | **Permanent ID** | Base64(SHA256(EK public key)) - Stable device identifier |
 
 ## Architecture
@@ -38,24 +42,24 @@ The combination ensures:
 |                                                                    |
 |  +---------------+    +---------------+    +-------------------+   |
 |  |    SWTPM      |    |    Server     |    |     OpenBao       |   |
-|  |  (TPM 2.0)    |    |    (gRPC)     |    |   (PKI + ACME)    |   |
+|  |  (TPM 2.0)    |    |  (gRPC+mTLS)  |    |   (PKI + ACME)    |   |
 |  +-------+-------+    +-------+-------+    +---------+---------+   |
 |          |                    |                      |             |
 |     port 2321            port 50051             port 8200          |
 +----------+--------------------+----------------------+-------------+
            |                    |                      |
-           | TPM2 Commands      | gRPC Protocol        | HTTP/ACME
+           | TPM2 Commands      | gRPC/TLS/mTLS        | HTTP/ACME
            |                    |                      |
 +----------+--------------------+----------------------+-------------+
 |          v                    v                      v             |
 |  +----------------------------------------------------------------+|
 |  |                          CLIENT                                ||
 |  |                                                                ||
-|  |  +-----------------+  +-----------------+  +-----------------+ ||
-|  |  | da-fingerprint  |  |     da-lak      |  |     da-gen      | ||
-|  |  |  (display EK    |  | (TCG credential |  | (ACME device-   | ||
-|  |  |   hash)         |  |  activation)    |  |  attest-01)     | ||
-|  |  +-----------------+  +-----------------+  +-----------------+ ||
+|  |  +--------------+ +----------+ +----------+ +---------------+  ||
+|  |  |da-fingerprint| | da-lak   | | da-agent | |    da-gen     |  ||
+|  |  | (EK hash)    | | (TCG     | | (ACME    | | (mTLS cert    |  ||
+|  |  |              | |  cred)   | |  attest) | |  generation)  |  ||
+|  |  +--------------+ +----------+ +----------+ +---------------+  ||
 |  +----------------------------------------------------------------+|
 |                              TOOLS                                 |
 +====================================================================+
@@ -73,24 +77,24 @@ The combination ensures:
 |  | (decrypt)   |                |  (storage root)  |               |
 |  +------+------+                +--------+---------+               |
 |         |                                |                         |
-|         |                       +--------+---------+               |
-|         |                       |                  |               |
-|         |               +-------+------+   +-------+-------+       |
-|         |               |      AK      |   |   Cert Key    |       |
-|         |               | (restricted  |   | (unrestricted |       |
-|         |               |  signing)    |   |  signing)     |       |
-|         |               +-------+------+   +-------+-------+       |
-|         |                       |                  |               |
-|         |  MakeCredential       |  TPM2_Certify    |               |
-|         +--------+--------------+                  |               |
-|                  |                                 |               |
-|                  v                                 v               |
-|         +--------+--------+               +-------+-------+        |
-|         | LAK Certificate |               | App Certificate|       |
-|         | (pki-ak CA)     |               | (pki-vpn CA)   |       |
-|         +-----------------+               +----------------+       |
+|         |                       +--------+--------+--------+       |
+|         |                       |                 |        |       |
+|         |               +-------+------+  +-------+----+ +-+-----+ |
+|         |               |      AK      |  | Agent Key  | |Cert   | |
+|         |               | (restricted  |  | (flexible  | |Key(s) | |
+|         |               |  signing)    |  |  signing)  | |       | |
+|         |               +-------+------+  +-----+------+ +---+---+ |
+|         |                       |               |             |    |
+|         |  MakeCredential       | TPM2_Certify  |             |    |
+|         +--------+--------------+               |             |    |
+|                  |                              |             |    |
+|                  v                              v             v    |
+|         +--------+--------+            +--------+---+ +------+---+ |
+|         | LAK Certificate |            |Agent Cert  | |Usage Cert| |
+|         | (pki-ak CA)     |            |(pki-agent) | |(pki-usage| |
+|         +-----------------+            +------------+ +----------+ |
 |                                                                    |
-|  Phase 1: TCG Credential          Phase 2: ACME device-attest-01   |
+|  Phase 1: TCG Credential   Phase 2: ACME    Phase 3: mTLS         |
 +====================================================================+
 ```
 
@@ -141,7 +145,7 @@ Per TCG TPM 2.0 Keys for Device Identity and Attestation:
       |                               |                           |
 ```
 
-### Phase 2: ACME Device Attestation (da-gen)
+### Phase 2: ACME Device Attestation (da-agent)
 
 Per draft-acme-device-attest-07:
 
@@ -151,21 +155,21 @@ Per draft-acme-device-attest-07:
       | Load LAK cert from da.json    |                           |
       |                               |                           |
       |  1. RequestCertificate        |                           |
-      |     (usage, permanent_id)     |                           |
+      |     (usage=agent, permanent_id)|                          |
       |------------------------------>|                           |
-      |                               | 2. POST /pki-vpn/roles/   |
-      |                               |    ipsec-vpn/acme/new-order
+      |                               | 2. POST /pki-agent/roles/ |
+      |                               |    agent/acme/new-order   |
       |                               |    identifier: permanent-id
       |                               |-------------------------->|
       |                               |<--------------------------|
       |                               |    device-attest-01       |
       |<-- challenge_token -----------|                           |
       |                               |                           |
-      | 3. Create Cert Key (TPM)      |                           |
-      |    - Non-restricted signing   |                           |
+      | 3. Create Agent Key (TPM)     |                           |
+      |    - Flexible signing scheme  |                           |
       |    - FixedTPM, FixedParent    |                           |
       |                               |                           |
-      | 4. TPM2_Certify(CertKey, AK)  |                           |
+      | 4. TPM2_Certify(AgentKey, AK) |                           |
       |    - Proves key attributes    |                           |
       |    - extraData = SHA256(      |                           |
       |        token.thumbprint)      |                           |
@@ -190,7 +194,7 @@ Per draft-acme-device-attest-07:
       |                               |<--------------------------|
       |<-- valid ----------------------|                           |
       |                               |                           |
-      | 8. Sign CSR with Cert Key     |                           |
+      | 8. Sign CSR with Agent Key    |                           |
       |    (TPM2_Sign)                |                           |
       |                               |                           |
       |  9. FinalizeOrder(CSR)        |                           |
@@ -198,9 +202,42 @@ Per draft-acme-device-attest-07:
       |                               | 10. POST /acme/finalize   |
       |                               |-------------------------->|
       |                               |<--------------------------|
-      |<-- certificate ----------------|                           |
+      |<-- agent certificate ---------|                           |
       |                               |                           |
-      | Save cert + key blobs         |                           |
+      | Save agent cert + key blobs   |                           |
+      |                               |                           |
+```
+
+### Phase 3: mTLS Certificate Generation (da-gen)
+
+Usage certificates are issued via mTLS authentication with the agent certificate:
+
+```
+    CLIENT                         SERVER                      OPENBAO
+      |                               |                           |
+      | Load agent cert + key blobs   |                           |
+      |                               |                           |
+      | Create Cert Key (TPM)         |                           |
+      | Sign CSR with Cert Key        |                           |
+      |                               |                           |
+      |  1. IssueCertificate (mTLS)   |                           |
+      |     TLS client cert: agent    |                           |
+      |     (usage, CSR)              |                           |
+      |=============================>|                           |
+      |     mTLS handshake uses       |                           |
+      |     TPM-backed agent key      |                           |
+      |                               |                           |
+      |                               | 2. Validate mTLS client   |
+      |                               |    cert is from pki-agent |
+      |                               |                           |
+      |                               | 3. POST /pki-usage/issue/ |
+      |                               |    <role> (CSR)           |
+      |                               |-------------------------->|
+      |                               |<--------------------------|
+      |                               |                           |
+      |<-- certificate + chain -------|                           |
+      |                               |                           |
+      | Save cert + key blobs locally |                           |
       |                               |                           |
 ```
 
@@ -232,13 +269,21 @@ make da-lak
 ```
 Performs MakeCredential/ActivateCredential, stores LAK cert in `/etc/da/da.json`
 
-**3. Generate Attested Certificate (ACME device-attest-01)**
+**3. Provision Agent Certificate (ACME device-attest-01)**
 ```bash
-make da-gen USAGE=ipsec-vpn
+make da-agent
 ```
-Output files:
-- `ipsec-vpn-key.blob` - TPM-encrypted key blobs (non-exportable)
-- `ipsec-vpn-cert.pem` - Signed certificate with full chain
+Creates TPM-attested agent identity, stores cert + key blobs in `/etc/da/da.json`
+
+**4. Generate Usage Certificate (mTLS)**
+```bash
+make da-gen USAGE=vpn
+# Or with custom output directory:
+make da-gen USAGE=vpn OUTPUT=/path/to/certs
+```
+Output files (in `./certs/` by default):
+- `vpn-key.blob` - TPM-encrypted key blobs (non-exportable)
+- `vpn-cert.pem` - Signed certificate with full CA chain
 
 ## Make Targets
 
@@ -247,13 +292,14 @@ Output files:
 | `make build` | Build all containers with Docker Buildx |
 | `make bin` | Extract binaries (`da-*`) to `./bin/` |
 | `make clean` | Remove containers, volumes, and images |
-| `make clean-client` | Clean client state (LAK, certificates) |
+| `make clean-client` | Clean client state (LAK, agent, certificates) |
 | `make clean-pki` | Clean OpenBao PKI (requires clean-client) |
 | `make clean-swtpm` | Clean SWTPM state (new EK on restart) |
 | `make run-server` | Start infrastructure (OpenBao + Server + SWTPM) |
 | `make da-fingerprint` | Display permanent identifier |
-| `make da-lak` | Provision LAK certificate (TCG) |
-| `make da-gen USAGE=<name>` | Generate attested certificate (ACME) |
+| `make da-lak` | Provision LAK certificate (TCG credential activation) |
+| `make da-agent` | Provision agent certificate (ACME device-attest-01) |
+| `make da-gen USAGE=<name> [OUTPUT=<dir>]` | Generate usage certificate (mTLS) |
 
 ## Components
 
@@ -263,32 +309,36 @@ Output files:
 |------|----------|---------|
 | `da-fingerprint` | - | Compute and display permanent ID from EK |
 | `da-lak` | TCG Credential Profiles | Provision LAK via credential activation |
-| `da-gen` | draft-acme-device-attest-07 | Generate TPM-attested certificates |
+| `da-agent` | draft-acme-device-attest-07 | Provision agent cert via TPM attestation |
+| `da-gen` | mTLS | Generate usage certificates with agent cert |
 
 ### Server (gRPC)
 
 - Validates EK certificates against manufacturer CAs (loaded from `/ca`)
 - Implements MakeCredential for LAK provisioning
-- Proxies ACME requests to OpenBao
-- Issues LAK certificates via OpenBao `/pki-ak/sign-verbatim/lak-device`
+- Proxies ACME requests to OpenBao for agent certificates
+- Issues usage certificates via mTLS (validates agent cert from pki-agent CA)
+- TLS for LAK/agent provisioning, mTLS for certificate generation
 
 ### OpenBao PKI Configuration
 
-| Mount | Role | Purpose |
-|-------|------|---------|
-| `/pki-ak` | `lak-device` | Privacy CA for LAK certificates |
-| `/pki-vpn` | `ipsec-vpn` | VPN certificates via ACME device-attest-01 |
+| Mount | Role | Purpose | Validity |
+|-------|------|---------|----------|
+| `/pki-ak` | `lak-device` | Privacy CA for LAK certificates | 1 year |
+| `/pki-grpc` | `server` | gRPC server TLS certificates | 30 days |
+| `/pki-agent` | `agent` | Agent identity via ACME device-attest-01 | 1 month |
+| `/pki-usage` | `vpn`, `wifi`, `tls` | Usage certificates via mTLS | 1 day |
 
 **LAK Certificate Properties** (per TCG spec):
 - Key Usage: `digitalSignature` only
 - Extended Key Usage: `tcg-kp-AttestationKey` (2.23.133.8.3)
 - SAN URI: `urn:permanent-identifier:<EK-hash>`
 
-**Usage Mappings** (extensible):
+**Usage Mappings**:
 ```
-ipsec-vpn, vpn -> pki-vpn/roles/ipsec-vpn
-wifi           -> pki-wifi/roles/wifi-client
-tls            -> pki-tls/roles/tls-client
+vpn  -> pki-usage/roles/vpn   (VPN client certificates)
+wifi -> pki-usage/roles/wifi  (WiFi/802.1X certificates)
+tls  -> pki-usage/roles/tls   (Generic TLS client certificates)
 ```
 
 ### SWTPM
@@ -304,8 +354,9 @@ Software TPM 2.0 emulator (libtpms + swtpm):
 |----------|---------------------|
 | **TPM Authenticity** | EK certificate chain to manufacturer CA |
 | **AK-EK Binding** | TPM2_ActivateCredential (MakeCredential challenge) |
-| **Key Non-Exportability** | TPM2_Certify proves FixedTPM, SensitiveDataOrigin |
+| **Agent Key Non-Exportability** | TPM2_Certify proves FixedTPM, SensitiveDataOrigin |
 | **Key-to-Device Binding** | extraData in TPMS_ATTEST contains challenge hash |
+| **Usage Cert Authorization** | mTLS with pki-agent issued certificate required |
 
 ## Standards
 

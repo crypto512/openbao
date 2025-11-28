@@ -54,6 +54,19 @@ RUN mkdir -p /build/bin/da-lak/proto && \
     go mod tidy && \
     CGO_ENABLED=1 GOOS=linux go build -ldflags='-linkmode external -extldflags "-static"' -o /bin/da-lak .
 
+# Build da-agent (needs client library + proto)
+# Static build with musl for portability across Linux distributions
+RUN mkdir -p /build/bin/da-agent/proto && \
+    cp client/*.go /build/bin/da-agent/ && \
+    cp cmd/da-agent/main.go /build/bin/da-agent/agent_main.go && \
+    cp -r /build/proto/* /build/bin/da-agent/proto/ && \
+    cd /build/bin/da-agent && \
+    cp /build/client/go.mod . && \
+    cp /build/client/go.sum . && \
+    sed -i 's|=> \.\./proto|=> ./proto|g' go.mod && \
+    go mod tidy && \
+    CGO_ENABLED=1 GOOS=linux go build -ldflags='-linkmode external -extldflags "-static"' -o /bin/da-agent .
+
 # Build da-gen (needs client library + proto)
 # Static build with musl for portability across Linux distributions
 RUN mkdir -p /build/bin/da-gen/proto && \
@@ -79,6 +92,7 @@ RUN mkdir -p /certs /etc/da && chmod 755 /etc/da
 # Copy binaries
 COPY --from=builder /bin/da-fingerprint /bin/da-fingerprint
 COPY --from=builder /bin/da-lak /bin/da-lak
+COPY --from=builder /bin/da-agent /bin/da-agent
 COPY --from=builder /bin/da-gen /bin/da-gen
 
 # Copy entrypoint for swtpm proxy setup

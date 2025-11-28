@@ -20,7 +20,7 @@ import (
 // Accounts are persisted to disk to ensure stable thumbprints across restarts
 type ACMEAccountManager struct {
 	mu           sync.RWMutex
-	accounts     map[string]*ACMEAccount // key: PKI path (e.g., "pki-vpn/roles/ipsec-vpn")
+	accounts     map[string]*ACMEAccount // key: PKI path (e.g., "pki-agent/roles/agent")
 	storagePath  string
 }
 
@@ -35,16 +35,16 @@ type ACMEAccount struct {
 
 // UsageConfig maps a usage name to PKI configuration
 type UsageConfig struct {
-	PKIPath string // e.g., "pki-vpn"
-	Role    string // e.g., "ipsec-vpn"
+	PKIPath string // e.g., "pki-usage"
+	Role    string // e.g., "vpn"
 }
 
-// Predefined usage mappings
+// Predefined usage mappings - all usages use pki-usage mount with usage-specific roles
 var usageMappings = map[string]UsageConfig{
-	"ipsec-vpn": {PKIPath: "pki-vpn", Role: "ipsec-vpn"},
-	"vpn":       {PKIPath: "pki-vpn", Role: "ipsec-vpn"},
-	"wifi":      {PKIPath: "pki-wifi", Role: "wifi-client"},
-	"tls":       {PKIPath: "pki-tls", Role: "tls-client"},
+	"vpn":   {PKIPath: "pki-usage", Role: "vpn"},
+	"wifi":  {PKIPath: "pki-usage", Role: "wifi"},
+	"tls":   {PKIPath: "pki-usage", Role: "tls"},
+	"agent": {PKIPath: "pki-agent", Role: "agent"},
 }
 
 // NewACMEAccountManager creates a new account manager with persistence
@@ -74,7 +74,7 @@ func NewACMEAccountManager(storagePath string) (*ACMEAccountManager, error) {
 func GetUsageConfig(usage string) (*UsageConfig, error) {
 	config, ok := usageMappings[usage]
 	if !ok {
-		return nil, fmt.Errorf("unknown usage: %s (supported: ipsec-vpn, vpn, wifi, tls)", usage)
+		return nil, fmt.Errorf("unknown usage: %s (supported: vpn, wifi, tls, agent)", usage)
 	}
 	return &config, nil
 }

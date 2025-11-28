@@ -114,10 +114,12 @@ services:
       - TPM_SWTPM_PORT=2321
       - DA_JSON_PATH=/etc/da/da.json
       - DA_OUTPUT_DIR=/certs
+      - SERVER_CA_PATH=/openbao-data/grpc-ca.pem
     volumes:
       - client-certs:/certs
       - client-da-config:/etc/da
       - ./ca:/ca:ro
+      - openbao-data:/openbao-data:ro
     networks:
       - attestation-net
 
@@ -137,6 +139,7 @@ services:
       - TPM2TOOLS_TCTI=device:/dev/tpmrm0
       - DA_JSON_PATH=/etc/da/da.json
       - DA_OUTPUT_DIR=/certs
+      - SERVER_CA_PATH=/openbao-data/grpc-ca.pem
     devices:
       - /dev/tpm0:/dev/tpm0
       - /dev/tpmrm0:/dev/tpmrm0
@@ -145,6 +148,7 @@ services:
       - client-certs:/certs
       - client-hw-da-config:/etc/da
       - ./ca:/ca:ro
+      - openbao-data:/openbao-data:ro
     networks:
       - attestation-net
     profiles:

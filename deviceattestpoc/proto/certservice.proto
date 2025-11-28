@@ -8,13 +8,19 @@ package certservice;
 option go_package = "github.com/openbao/openbao/deviceattestpoc/proto;certservice";
 
 service CertificateService {
+  // ACME-based certificate issuance (TLS only, no client cert required)
   rpc RequestCertificate(CertRequest) returns (CertResponse);
   rpc SubmitAttestation(AttestationSubmit) returns (CertResponse);
   rpc FinalizeOrder(FinalizeRequest) returns (CertResponse);
   rpc GetCertificate(GetCertRequest) returns (CertResponse);
+
+  // TPM enrollment and LAK provisioning (TLS only)
   rpc EnrollTPM(TPMEnrollmentRequest) returns (EnrollmentResponse);
   rpc ProvisionLAK(ProvisionLAKRequest) returns (ProvisionLAKResponse);
   rpc ActivateCredential(ActivateCredentialRequest) returns (ActivateCredentialResponse);
+
+  // mTLS-protected certificate issuance (requires valid agent certificate)
+  rpc IssueCertificate(IssueCertRequest) returns (IssueCertResponse);
 }
 
 message CertRequest {
@@ -94,4 +100,24 @@ message ActivateCredentialResponse {
   string lak_root_ca_pem = 4;
   string not_before = 5;
   string not_after = 6;
+}
+
+// Request for mTLS-authenticated certificate issuance
+message IssueCertRequest {
+  string usage = 1;             // Certificate usage (e.g., "vpn", "wifi", "tls")
+  string csr_pem = 2;           // PKCS#10 CSR (TPM-signed)
+  string common_name = 3;       // Optional CN override
+  repeated string san_dns = 4;  // Optional DNS SANs
+  repeated string san_ips = 5;  // Optional IP SANs
+}
+
+// Response for mTLS-authenticated certificate issuance
+message IssueCertResponse {
+  string status = 1;            // "success" or "error"
+  string error = 2;             // Error message if status is "error"
+  string certificate_pem = 3;   // Issued certificate
+  string chain_pem = 4;         // CA chain
+  string ca_pem = 5;            // Issuing CA certificate
+  string not_before = 6;        // Certificate validity start (RFC3339)
+  string not_after = 7;         // Certificate validity end (RFC3339)
 }

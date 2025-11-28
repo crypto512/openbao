@@ -16,7 +16,6 @@ import (
 
 	pb "github.com/openbao/openbao/deviceattestpoc/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -29,14 +28,17 @@ func run() error {
 	serverAddr := flag.String("server", "", "gRPC server address")
 	tpmDevice := flag.String("tpm", "", "TPM device path")
 	clear := flag.Bool("clear", false, "Clear existing da.json and re-provision")
+	serverCA := flag.String("server-ca", "", "Server CA certificate for TLS")
 	flag.Parse()
 
 	finalServerAddr := GetConfigString(*serverAddr, "GRPC_SERVER", "localhost:50051")
 	finalTPMDevice := GetConfigString(*tpmDevice, "TPM_DEVICE", "/dev/tpmrm0")
+	finalServerCA := GetConfigString(*serverCA, "SERVER_CA_PATH", "/openbao-data/grpc-ca.pem")
 
 	log.Printf("da-lak: LAK Certificate Provisioning")
 	log.Printf("Server: %s", finalServerAddr)
 	log.Printf("TPM: %s", finalTPMDevice)
+	log.Printf("Server CA: %s", finalServerCA)
 
 	if *clear {
 		if err := ClearBlobs(); err != nil {
@@ -60,7 +62,13 @@ func run() error {
 		return nil
 	}
 
-	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Connect to server via TLS (server verification only, no client cert)
+	creds, err := NewTLSCredentials(finalServerCA)
+	if err != nil {
+		return fmt.Errorf("failed to create TLS credentials: %w", err)
+	}
+
+	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}

@@ -1,11 +1,11 @@
-// da-gen generates an attested certificate for a specific usage (e.g., VPN)
-// Uses TPM-bound keys following draft-acme-device-attest-07.
+// da-gen generates certificates using mTLS authentication with agent cert
+// This requires agent certificate to be provisioned first via da-agent.
 //
-// Usage: da-gen --usage vpn [--server localhost:50051] [--tpm /dev/tpmrm0] [--output /certs]
+// Usage: da-gen --usage vpn [--server localhost:50051] [--tpm /dev/tpmrm0] [--output ./certs]
 //
 // Output files:
 //   - <usage>-key.blob: TPM key blobs (encrypted, can only be used with this TPM)
-//   - <usage>-cert.pem: Certificate with full CA chain
+//   - <usage>-cert.pem: Certificate with full CA chain (leaf + intermediate + root)
 package main
 
 import (
@@ -20,7 +20,6 @@ import (
 
 	pb "github.com/openbao/openbao/deviceattestpoc/proto"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // CertKeyBlobs stores the TPM key blobs for persistence
@@ -36,10 +35,11 @@ func main() {
 }
 
 func run() error {
-	usage := flag.String("usage", "", "Certificate usage (e.g., vpn)")
+	usage := flag.String("usage", "", "Certificate usage (e.g., vpn, wifi, tls)")
 	serverAddr := flag.String("server", "", "gRPC server address")
 	tpmDevice := flag.String("tpm", "", "TPM device path")
 	outputDir := flag.String("output", "", "Output directory for certificate and key")
+	serverCA := flag.String("server-ca", "", "Server CA certificate for TLS")
 	flag.Parse()
 
 	if *usage == "" {
@@ -48,29 +48,37 @@ func run() error {
 
 	finalServerAddr := GetConfigString(*serverAddr, "GRPC_SERVER", "localhost:50051")
 	finalTPMDevice := GetConfigString(*tpmDevice, "TPM_DEVICE", "/dev/tpmrm0")
-	finalOutputDir := GetConfigString(*outputDir, "DA_OUTPUT_DIR", "/certs")
+	finalOutputDir := GetConfigString(*outputDir, "DA_OUTPUT_DIR", ".")
+	finalServerCA := GetConfigString(*serverCA, "SERVER_CA_PATH", "/openbao-data/grpc-ca.pem")
 
-	log.Printf("da-gen: Attested Certificate Generation (TPM-bound)")
+	log.Printf("da-gen: Certificate Generation (mTLS)")
 	log.Printf("Usage: %s", *usage)
 	log.Printf("Server: %s", finalServerAddr)
 	log.Printf("TPM: %s", finalTPMDevice)
 	log.Printf("Output: %s", finalOutputDir)
 
-	// Initialize TPM client (loads AK + LAK from da.json)
+	// Initialize TPM client
 	tpmClient, err := NewTPMClient(finalTPMDevice)
 	if err != nil {
 		return fmt.Errorf("failed to initialize TPM: %w", err)
 	}
 	defer tpmClient.Close()
 
+	// Check prerequisites
 	if tpmClient.NeedsLAKProvisioning() {
 		return fmt.Errorf("LAK not provisioned. Run da-lak first")
 	}
+	if tpmClient.NeedsAgentProvisioning() {
+		return fmt.Errorf("Agent not provisioned. Run da-agent first")
+	}
+
+	// Close AK to free TPM object slots - we don't need it for mTLS
+	tpmClient.CloseAK()
 
 	permanentID := tpmClient.GetPermanentID()
 	log.Printf("Permanent ID: %s", permanentID)
 
-	// Create TPM-bound signing key
+	// Create TPM-bound key for this usage certificate
 	log.Printf("Creating TPM-bound signing key...")
 	certKey, err := tpmClient.CreateCertKey()
 	if err != nil {
@@ -81,8 +89,35 @@ func run() error {
 	// Build common name with usage prefix
 	commonName := fmt.Sprintf("%s-%s", *usage, permanentID)
 
-	// Connect to server
-	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Generate CSR signed by TPM key
+	log.Printf("Generating CSR (TPM-signed)...")
+	csrPEM, err := tpmClient.SignCSR(certKey, commonName, nil)
+	if err != nil {
+		return fmt.Errorf("failed to generate CSR: %w", err)
+	}
+
+	// Load agent certificate and key for mTLS
+	agentCertPEM := GetAgentCertPEM()
+	agentKeyPriv, agentKeyPub, agentExists := GetAgentKeyBlobs()
+	if !agentExists || agentCertPEM == "" {
+		return fmt.Errorf("agent certificate not found")
+	}
+
+	// Connect to server via mTLS using agent cert
+	log.Printf("Connecting to server with mTLS...")
+	creds, agentKey, err := NewMTLSCredentialsWithTPM(&MTLSConfig{
+		ServerCAPath: finalServerCA,
+		AgentCertPEM: agentCertPEM,
+		AgentKeyPriv: agentKeyPriv,
+		AgentKeyPub:  agentKeyPub,
+		TPMClient:    tpmClient,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create mTLS credentials: %w", err)
+	}
+	defer tpmClient.CloseCertKey(agentKey)
+
+	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
@@ -92,99 +127,18 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Create ACME order
-	log.Printf("Creating ACME order...")
-	resp, err := client.RequestCertificate(ctx, &pb.CertRequest{
-		CommonName:          commonName,
-		SanDns:              []string{},
-		SanIps:              []string{},
-		PermanentIdentifier: permanentID,
-		Usage:               *usage,
+	// Call IssueCertificate RPC (mTLS-protected, no ACME)
+	log.Printf("Requesting certificate via mTLS...")
+	resp, err := client.IssueCertificate(ctx, &pb.IssueCertRequest{
+		Usage:      *usage,
+		CsrPem:     csrPEM,
+		CommonName: commonName,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create order: %w", err)
+		return fmt.Errorf("certificate issuance failed: %w", err)
 	}
-	if resp.Status == "error" {
-		return fmt.Errorf("order creation failed: %s", resp.Error)
-	}
-	log.Printf("ACME order created: %s", resp.OrderId)
-
-	// Generate attestation using TPM2_Certify
-	log.Printf("Generating TPM attestation...")
-	keyAuthorization := fmt.Sprintf("%s.%s", resp.ChallengeToken, resp.AccountThumbprint)
-	attestationObject, err := tpmClient.GenerateAttestation(certKey, keyAuthorization)
-	if err != nil {
-		return fmt.Errorf("failed to generate attestation: %w", err)
-	}
-
-	// Submit attestation
-	log.Printf("Submitting attestation...")
-	attResp, err := client.SubmitAttestation(ctx, &pb.AttestationSubmit{
-		OrderId:           resp.OrderId,
-		AuthorizationUrl:  resp.AuthorizationUrl,
-		ChallengeUrl:      resp.ChallengeUrl,
-		AttestationObject: attestationObject,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to submit attestation: %w", err)
-	}
-	if attResp.Status == "error" {
-		return fmt.Errorf("attestation failed: %s", attResp.Error)
-	}
-
-	// Wait for order to become ready
-	log.Printf("Waiting for order to become ready...")
-	var lastStatus string
-	for attempt := 1; attempt <= 10; attempt++ {
-		orderResp, err := client.GetCertificate(ctx, &pb.GetCertRequest{OrderId: resp.OrderId})
-		if err != nil {
-			log.Printf("Attempt %d: error checking order: %v", attempt, err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		lastStatus = orderResp.Status
-		if lastStatus == "ready" || lastStatus == "valid" {
-			log.Printf("Order is ready")
-			break
-		}
-		if attempt == 10 {
-			return fmt.Errorf("order not ready after 10 attempts, last status: %s", lastStatus)
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	// Generate CSR signed by TPM key
-	log.Printf("Generating CSR (TPM-signed)...")
-	csrPEM, err := tpmClient.SignCSR(certKey, commonName, nil)
-	if err != nil {
-		return fmt.Errorf("failed to generate CSR: %w", err)
-	}
-
-	// Finalize order
-	log.Printf("Finalizing order...")
-	finalizeResp, err := client.FinalizeOrder(ctx, &pb.FinalizeRequest{
-		OrderId: resp.OrderId,
-		CsrPem:  csrPEM,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to finalize order: %w", err)
-	}
-	if finalizeResp.Status == "error" {
-		return fmt.Errorf("order finalization failed: %s", finalizeResp.Error)
-	}
-
-	// Retrieve certificate
-	log.Printf("Retrieving certificate...")
-	var certResp *pb.CertResponse
-	for attempt := 1; attempt <= 30; attempt++ {
-		certResp, err = client.GetCertificate(ctx, &pb.GetCertRequest{OrderId: resp.OrderId})
-		if err == nil && certResp.Status == "valid" {
-			break
-		}
-		if attempt == 30 {
-			return fmt.Errorf("certificate not ready after 30 attempts")
-		}
-		time.Sleep(2 * time.Second)
+	if resp.Status != "success" {
+		return fmt.Errorf("certificate issuance failed: %s", resp.Error)
 	}
 
 	// Write output files
@@ -209,8 +163,12 @@ func run() error {
 		return fmt.Errorf("failed to write key blobs: %w", err)
 	}
 
-	// Write certificate with full chain
-	if err := os.WriteFile(certPath, []byte(certResp.CertificatePem), 0644); err != nil {
+	// Write certificate with chain
+	certData := resp.CertificatePem
+	if resp.ChainPem != "" {
+		certData += "\n" + resp.ChainPem
+	}
+	if err := os.WriteFile(certPath, []byte(certData), 0644); err != nil {
 		return fmt.Errorf("failed to write certificate: %w", err)
 	}
 
@@ -218,5 +176,8 @@ func run() error {
 	log.Printf("  Key blobs: %s (TPM-bound, use with this device only)", blobPath)
 	log.Printf("  Cert: %s", certPath)
 	log.Printf("  CN: %s", commonName)
+	if resp.NotBefore != "" && resp.NotAfter != "" {
+		log.Printf("  Valid: %s to %s", resp.NotBefore, resp.NotAfter)
+	}
 	return nil
 }

@@ -48,6 +48,7 @@ type Server struct {
 	trustedEKCAs       map[string]*x509.Certificate
 	allowedEKHashes    map[string]bool
 	activationSessions map[string]*ActivationSession
+	agentCACertPool    *x509.CertPool // For mTLS validation of agent certificates
 }
 
 type ActivationSession struct {
@@ -300,6 +301,57 @@ func (s *Server) ActivateCredential(ctx context.Context, req *pb.ActivateCredent
 	}, nil
 }
 
+// IssueCertificate handles mTLS-authenticated certificate issuance
+// This RPC is protected by MTLSUnaryInterceptor - client cert already validated
+func (s *Server) IssueCertificate(ctx context.Context, req *pb.IssueCertRequest) (*pb.IssueCertResponse, error) {
+	// Client cert already validated by interceptor
+	clientCert := GetClientCert(ctx)
+	if clientCert == nil {
+		return &pb.IssueCertResponse{Status: "error", Error: "no client certificate"}, nil
+	}
+
+	permanentID := ExtractPermanentIDFromCert(clientCert)
+	log.Printf("IssueCertificate: usage=%s, requester=%s", req.Usage, permanentID)
+
+	// Get PKI configuration for this usage
+	usageConfig, err := GetUsageConfig(req.Usage)
+	if err != nil {
+		return &pb.IssueCertResponse{Status: "error", Error: err.Error()}, nil
+	}
+
+	// Validate CSR
+	if req.CsrPem == "" {
+		return &pb.IssueCertResponse{Status: "error", Error: "CSR is required"}, nil
+	}
+
+	// Use sign-verbatim for certificate issuance
+	certPEM, chainPEM, caPEM, err := s.openbaoClient.SignCertificate(ctx, usageConfig.PKIPath, usageConfig.Role, req.CsrPem, "72h")
+	if err != nil {
+		log.Printf("IssueCertificate failed: %v", err)
+		return &pb.IssueCertResponse{Status: "error", Error: err.Error()}, nil
+	}
+
+	// Parse cert for validity dates
+	block, _ := pem.Decode([]byte(certPEM))
+	var notBefore, notAfter string
+	if block != nil {
+		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+			notBefore = cert.NotBefore.Format(time.RFC3339)
+			notAfter = cert.NotAfter.Format(time.RFC3339)
+		}
+	}
+
+	log.Printf("IssueCertificate success: usage=%s, requester=%s", req.Usage, permanentID)
+	return &pb.IssueCertResponse{
+		Status:         "success",
+		CertificatePem: certPEM,
+		ChainPem:       chainPEM,
+		CaPem:          caPEM,
+		NotBefore:      notBefore,
+		NotAfter:       notAfter,
+	}, nil
+}
+
 // parseCertificateAuto parses a certificate from raw data, auto-detecting format.
 // For .der files, it parses directly as DER.
 // For .pem and .crt files, it tries PEM first, then falls back to DER.
@@ -442,21 +494,53 @@ func main() {
 		log.Fatalf("Failed to create OpenBao client: %v", err)
 	}
 
+	// Load agent CA for mTLS client validation
+	agentCAPath := os.Getenv("AGENT_CA_PATH")
+	if agentCAPath == "" {
+		agentCAPath = "/openbao-data/agent-ca.pem"
+	}
+	agentCAPool, err := LoadCACertPool(agentCAPath)
+	if err != nil {
+		log.Fatalf("Failed to load agent CA: %v", err)
+	}
+	log.Printf("Loaded agent CA from: %s", agentCAPath)
+
+	// Request TLS certificate from OpenBao
+	ctx := context.Background()
+	certPEM, keyPEM, err := openbaoClient.RequestServerCertificate(ctx, "grpc-server", []string{"server", "localhost"})
+	if err != nil {
+		log.Fatalf("Failed to get server TLS certificate: %v", err)
+	}
+	log.Printf("Server TLS certificate obtained from OpenBao")
+
+	// Create TLS credentials with optional mTLS
+	creds, err := NewServerTLSCredentials(certPEM, keyPEM, agentCAPool)
+	if err != nil {
+		log.Fatalf("Failed to create TLS credentials: %v", err)
+	}
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
-	pb.RegisterCertificateServiceServer(grpcServer, &Server{
+	server := &Server{
 		openbaoClient:      openbaoClient,
 		orders:             make(map[string]*OrderInfo),
 		trustedEKCAs:       trustedCAs,
 		allowedEKHashes:    make(map[string]bool),
 		activationSessions: make(map[string]*ActivationSession),
-	})
+		agentCACertPool:    agentCAPool,
+	}
 
-	log.Printf("Server ready")
+	// Create gRPC server with TLS and mTLS interceptor
+	grpcServer := grpc.NewServer(
+		grpc.Creds(creds),
+		grpc.UnaryInterceptor(server.MTLSUnaryInterceptor),
+	)
+	pb.RegisterCertificateServiceServer(grpcServer, server)
+
+	log.Printf("Server ready (TLS enabled)")
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}

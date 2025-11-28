@@ -276,17 +276,17 @@ func (c *OpenBaoClient) createACMEOrderOnce(ctx context.Context, pkiPath, perman
 }
 
 // extractPKIPathFromURL extracts the PKI path from an ACME URL
-// e.g., http://openbao:8200/v1/pki-vpn/roles/ipsec-vpn/acme/order/xxx -> pki-vpn/roles/ipsec-vpn
+// e.g., http://openbao:8200/v1/pki-agent/roles/agent/acme/order/xxx -> pki-agent/roles/agent
 func extractPKIPathFromURL(acmeURL string) string {
 	// Find /v1/ and then extract until /acme/
 	idx := strings.Index(acmeURL, "/v1/")
 	if idx == -1 {
-		return "pki-vpn/roles/ipsec-vpn" // default fallback
+		return "pki-agent/roles/agent" // default fallback
 	}
 	rest := acmeURL[idx+4:] // after /v1/
 	acmeIdx := strings.Index(rest, "/acme/")
 	if acmeIdx == -1 {
-		return "pki-vpn/roles/ipsec-vpn" // default fallback
+		return "pki-agent/roles/agent" // default fallback
 	}
 	return rest[:acmeIdx]
 }
@@ -533,7 +533,7 @@ type acmeChallenge struct {
 }
 
 func (c *OpenBaoClient) getACMEDirectory() (*acmeDirectory, error) {
-	return c.getACMEDirectoryForPath("pki-vpn/roles/ipsec-vpn")
+	return c.getACMEDirectoryForPath("pki-agent/roles/agent")
 }
 
 func (c *OpenBaoClient) getACMEDirectoryForPath(pkiPath string) (*acmeDirectory, error) {
@@ -553,7 +553,8 @@ func (c *OpenBaoClient) getACMEDirectoryForPath(pkiPath string) (*acmeDirectory,
 
 func (c *OpenBaoClient) getAuthorization(authzURL string) (*acmeAuthorization, error) {
 	// Legacy method - get default account for backward compatibility
-	account, err := c.accountManager.GetOrCreateAccount("pki-vpn/roles/ipsec-vpn")
+	pkiPath := extractPKIPathFromURL(authzURL)
+	account, err := c.accountManager.GetOrCreateAccount(pkiPath)
 	if err != nil {
 		return nil, err
 	}
@@ -581,7 +582,7 @@ func (c *OpenBaoClient) getAuthorizationWithAccount(authzURL string, account *AC
 
 func (c *OpenBaoClient) buildJWS(url, kid string, payload []byte, includeJWK bool) (string, error) {
 	// Legacy method - get default account for backward compatibility
-	account, err := c.accountManager.GetOrCreateAccount("pki-vpn/roles/ipsec-vpn")
+	account, err := c.accountManager.GetOrCreateAccount("pki-agent/roles/agent")
 	if err != nil {
 		return "", err
 	}
@@ -589,7 +590,9 @@ func (c *OpenBaoClient) buildJWS(url, kid string, payload []byte, includeJWK boo
 }
 
 func (c *OpenBaoClient) buildJWSWithAccount(url, kid string, payload []byte, includeJWK bool, account *ACMEAccount) (string, error) {
-	nonce, err := c.getNonce()
+	// Extract PKI path from the URL to get nonce from correct endpoint
+	pkiPath := extractPKIPathFromURL(url)
+	nonce, err := c.getNonceForPath(pkiPath)
 	if err != nil {
 		return "", err
 	}
@@ -643,7 +646,11 @@ func (c *OpenBaoClient) buildJWSWithAccount(url, kid string, payload []byte, inc
 }
 
 func (c *OpenBaoClient) getNonce() (string, error) {
-	directory, err := c.getACMEDirectory()
+	return c.getNonceForPath("pki-agent/roles/agent")
+}
+
+func (c *OpenBaoClient) getNonceForPath(pkiPath string) (string, error) {
+	directory, err := c.getACMEDirectoryForPath(pkiPath)
 	if err != nil {
 		return "", err
 	}
@@ -664,7 +671,7 @@ func pemToBase64URL(pemData string) (string, error) {
 }
 
 func (c *OpenBaoClient) IsTPMEnrolled(ctx context.Context, permanentID string) (bool, error) {
-	listURL := fmt.Sprintf("%s/v1/pki-vpn/config/acme/ak-ca-roots?list=true", c.baseURL)
+	listURL := fmt.Sprintf("%s/v1/pki-agent/config/acme/ak-ca-roots?list=true", c.baseURL)
 	req, _ := http.NewRequestWithContext(ctx, "GET", listURL, nil)
 
 	resp, err := c.doWithRetry(ctx, req)
@@ -1002,4 +1009,85 @@ func getECDSASigAlgorithm(curve elliptic.Curve) asn1.ObjectIdentifier {
 	default:
 		return oidECDSAWithSHA256
 	}
+}
+
+// RequestServerCertificate requests a TLS certificate from OpenBao pki-grpc for the server
+func (c *OpenBaoClient) RequestServerCertificate(ctx context.Context, cn string, sans []string) (certPEM, keyPEM string, err error) {
+	payload := map[string]interface{}{
+		"common_name": cn,
+		"alt_names":   strings.Join(sans, ","),
+		"ttl":         "720h",
+	}
+	payloadJSON, _ := json.Marshal(payload)
+
+	issueURL := fmt.Sprintf("%s/v1/pki-grpc/issue/server", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", issueURL, bytes.NewReader(payloadJSON))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doWithRetry(ctx, req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("certificate issuance failed: %s", string(body))
+	}
+
+	var issueResp struct {
+		Data struct {
+			Certificate string `json:"certificate"`
+			PrivateKey  string `json:"private_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &issueResp); err != nil {
+		return "", "", err
+	}
+
+	return issueResp.Data.Certificate, issueResp.Data.PrivateKey, nil
+}
+
+// SignCertificate uses sign-verbatim to issue a certificate for mTLS-authenticated requests
+func (c *OpenBaoClient) SignCertificate(ctx context.Context, pkiPath, role, csrPEM, ttl string) (certPEM, chainPEM, caPEM string, err error) {
+	signURL := fmt.Sprintf("%s/v1/%s/sign-verbatim/%s", c.baseURL, pkiPath, role)
+
+	payload := map[string]interface{}{
+		"csr": csrPEM,
+		"ttl": ttl,
+	}
+	payloadJSON, _ := json.Marshal(payload)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", signURL, bytes.NewReader(payloadJSON))
+	if err != nil {
+		return "", "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doWithRetry(ctx, req)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("sign-verbatim failed: %s", string(body))
+	}
+
+	var signResp struct {
+		Data struct {
+			Certificate string   `json:"certificate"`
+			CAChain     []string `json:"ca_chain"`
+			IssuingCA   string   `json:"issuing_ca"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &signResp); err != nil {
+		return "", "", "", err
+	}
+
+	return signResp.Data.Certificate, strings.Join(signResp.Data.CAChain, "\n"), signResp.Data.IssuingCA, nil
 }

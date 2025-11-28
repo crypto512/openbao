@@ -1,7 +1,7 @@
 # Makefile for ACME Device Attestation PoC
-# Device attestation tools: da-fingerprint, da-lak, da-gen
+# Device attestation tools: da-fingerprint, da-lak, da-agent, da-gen
 
-.PHONY: help build bin clean clean-client clean-pki clean-swtpm run-server da-fingerprint da-lak da-gen
+.PHONY: help build bin clean clean-client clean-pki clean-swtpm run-server da-fingerprint da-lak da-agent da-gen
 
 help:
 	@echo "ACME Device Attestation PoC - Make targets:"
@@ -20,12 +20,15 @@ help:
 	@echo "Device Attestation Tools:"
 	@echo "  make da-fingerprint       - Display permanent identifier (EK hash)"
 	@echo "  make da-lak               - Provision LAK certificate"
-	@echo "  make da-gen USAGE=<name>  - Generate attested certificate (e.g., USAGE=ipsec-vpn)"
+	@echo "  make da-agent             - Provision agent certificate (ACME device-attest-01)"
+	@echo "  make da-gen USAGE=<name> [OUTPUT=<dir>] - Generate usage certificate"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make da-fingerprint"
 	@echo "  make da-lak"
-	@echo "  make da-gen USAGE=ipsec-vpn"
+	@echo "  make da-agent"
+	@echo "  make da-gen USAGE=vpn                   # Output to ./certs/"
+	@echo "  make da-gen USAGE=vpn OUTPUT=/tmp/out   # Output to /tmp/out/"
 	@echo ""
 
 # Build all containers
@@ -43,6 +46,7 @@ bin: build
 		(docker rm -f da-bin-extract 2>/dev/null && docker create --name da-bin-extract deviceattestpoc-client true)
 	@docker cp da-bin-extract:/bin/da-fingerprint bin/
 	@docker cp da-bin-extract:/bin/da-lak bin/
+	@docker cp da-bin-extract:/bin/da-agent bin/
 	@docker cp da-bin-extract:/bin/da-gen bin/
 	@docker rm -f da-bin-extract
 	@echo "✓ Binaries extracted:"
@@ -102,17 +106,27 @@ da-lak:
 	@docker compose run --rm client /bin/da-lak
 	@echo "✓ LAK provisioned"
 
-# Generate attested certificate
-# Usage: make da-gen USAGE=vpn
+# Provision agent certificate via ACME device-attest-01
+da-agent:
+	@echo "Provisioning agent certificate..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client /bin/da-agent
+	@echo "✓ Agent certificate provisioned"
+
+# Generate usage certificate via mTLS
+# Usage: make da-gen USAGE=vpn [OUTPUT=./certs]
+OUTPUT ?= ./certs
+
 da-gen:
 ifndef USAGE
 	$(error USAGE is required. Example: make da-gen USAGE=vpn)
 endif
 	@echo "Generating certificate for usage=$(USAGE)..."
+	@mkdir -p $(OUTPUT)
 	@docker compose up -d openbao init server tpm1
 	@sleep 3
-	@docker compose run --rm client /bin/da-gen --usage $(USAGE)
-	@echo "✓ Certificate generated"
+	@docker compose run --rm -v $(abspath $(OUTPUT)):/output client /bin/da-gen --usage $(USAGE) --output /output
 	@echo ""
-	@echo "Output files in container volume 'client-certs':"
-	@docker compose run --rm client ls -la /certs/$(USAGE)-*.pem 2>/dev/null || echo "  (files available after successful generation)"
+	@echo "✓ Certificate generated:"
+	@ls -la $(OUTPUT)/$(USAGE)-cert.pem $(OUTPUT)/$(USAGE)-key.blob 2>/dev/null || echo "  (check $(OUTPUT) for output files)"

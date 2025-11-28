@@ -106,30 +106,30 @@ api_request() {
 
 check_pki_configured() {
     local mounts=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/sys/mounts")
-    if ! echo "$mounts" | jq -e '.["pki-ak/"]' > /dev/null 2>&1; then
-        return 1
-    fi
-    if ! echo "$mounts" | jq -e '.["pki-vpn/"]' > /dev/null 2>&1; then
-        return 1
-    fi
 
-    local ak_ca=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-ak/issuers?list=true" 2>/dev/null)
-    if ! echo "$ak_ca" | jq -e '.data.keys | length > 0' > /dev/null 2>&1; then
-        return 1
-    fi
+    # Check all required PKI mounts
+    for mount in "pki-ak/" "pki-grpc/" "pki-agent/" "pki-usage/"; do
+        if ! echo "$mounts" | jq -e ".\"$mount\"" > /dev/null 2>&1; then
+            return 1
+        fi
+    done
 
-    local vpn_ca=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-vpn/issuers?list=true" 2>/dev/null)
-    if ! echo "$vpn_ca" | jq -e '.data.keys | length > 0' > /dev/null 2>&1; then
-        return 1
-    fi
+    # Check CAs are generated
+    for pki in "pki-ak" "pki-grpc" "pki-agent" "pki-usage"; do
+        local ca=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/$pki/issuers?list=true" 2>/dev/null)
+        if ! echo "$ca" | jq -e '.data.keys | length > 0' > /dev/null 2>&1; then
+            return 1
+        fi
+    done
 
-    local role=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-vpn/roles/ipsec-vpn" 2>/dev/null)
-    if ! echo "$role" | jq -e '.data.allow_device_attestation == true' > /dev/null 2>&1; then
-        return 1
-    fi
-
-    local acme=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-vpn/config/acme" 2>/dev/null)
+    # Check agent ACME is enabled
+    local acme=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-agent/config/acme" 2>/dev/null)
     if ! echo "$acme" | jq -e '.data.enabled == true' > /dev/null 2>&1; then
+        return 1
+    fi
+
+    # Check CA exports exist
+    if [ ! -f "/data/grpc-ca.pem" ] || [ ! -f "/data/agent-ca.pem" ]; then
         return 1
     fi
 
@@ -172,61 +172,116 @@ api_request POST "pki-ak/roles/lak-device" '{
   "no_store": true
 }'
 
-# VPN CA
-curl -s -X DELETE -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/sys/mounts/pki-vpn" > /dev/null 2>&1 || true
-api_request POST "sys/mounts/pki-vpn" '{"type": "pki", "config": {"max_lease_ttl": "87600h"}}'
-api_request POST "sys/mounts/pki-vpn/tune" '{"allowed_response_headers": ["Last-Modified", "Replay-Nonce", "Link", "Location"]}'
-api_request POST "pki-vpn/root/generate/internal" '{"common_name": "OpenBao VPN CA", "issuer_name": "vpn-root-ca", "ttl": "87600h"}'
+# Get AK CA for agent attestation validation
+AK_CA_CERT=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-ak/ca/pem" 2>/dev/null)
+AK_CA_CERT_ESCAPED=$(echo "$AK_CA_CERT" | jq -Rs .)
 
-# Trust AK CA
-ak_ca_cert=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-ak/cert/ca" | jq -r '.data.certificate')
-api_request POST "pki-vpn/config/acme/ak-ca-roots/openbao-ak" "{
+# gRPC Server TLS CA
+echo ""
+echo "Setting up gRPC TLS CA..."
+curl -s -X DELETE -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/sys/mounts/pki-grpc" > /dev/null 2>&1 || true
+api_request POST "sys/mounts/pki-grpc" '{"type": "pki", "config": {"max_lease_ttl": "87600h"}}'
+api_request POST "pki-grpc/root/generate/internal" '{"common_name": "OpenBao gRPC CA", "issuer_name": "grpc-root-ca", "ttl": "87600h"}'
+
+# gRPC server role - for server TLS certificates
+api_request POST "pki-grpc/roles/server" '{
+  "allow_any_name": true,
+  "enforce_hostnames": false,
+  "max_ttl": "720h",
+  "key_usage": ["DigitalSignature", "KeyEncipherment"],
+  "ext_key_usage": ["ServerAuth"]
+}'
+
+# Agent CA (ACME with device attestation)
+echo ""
+echo "Setting up Agent CA..."
+curl -s -X DELETE -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/sys/mounts/pki-agent" > /dev/null 2>&1 || true
+api_request POST "sys/mounts/pki-agent" '{"type": "pki", "config": {"max_lease_ttl": "87600h"}}'
+api_request POST "sys/mounts/pki-agent/tune" '{"allowed_response_headers": ["Last-Modified", "Replay-Nonce", "Link", "Location"]}'
+api_request POST "pki-agent/root/generate/internal" '{"common_name": "OpenBao Agent CA", "issuer_name": "agent-root-ca", "ttl": "87600h"}'
+
+# Trust AK CA for agent attestation validation
+api_request POST "pki-agent/config/acme/ak-ca-roots/openbao-ak" "{
   \"name\": \"openbao-ak\",
-  \"certificate\": $(echo "$ak_ca_cert" | jq -Rs .)
+  \"certificate\": $AK_CA_CERT_ESCAPED
 }"
 
-# Attestation config
-api_request POST "pki-vpn/config/attestation" '{
+# Agent attestation config
+api_request POST "pki-agent/config/attestation" '{
   "enabled": true,
   "validate_ek_certificate": true,
   "allowed_attestation_formats": ["tpm"]
 }'
 
-# VPN role
-# For device attestation, CN is based on permanent identifier (EK hash)
-# so we need allow_any_name to permit non-DNS common names
-api_request POST "pki-vpn/roles/ipsec-vpn" '{
+# Agent role - hardware-bound agent identity certificates (1 month validity)
+api_request POST "pki-agent/roles/agent" '{
   "allow_any_name": true,
   "enforce_hostnames": false,
-  "max_ttl": "72h",
-  "allow_ip_sans": true,
-  "server_flag": false,
-  "client_flag": true,
-  "key_usage": ["DigitalSignature", "KeyEncipherment", "KeyAgreement"],
+  "max_ttl": "720h",
+  "key_usage": ["DigitalSignature"],
   "ext_key_usage": ["ClientAuth"],
-  "ext_key_usage_oids": ["1.3.6.1.5.5.7.3.5", "1.3.6.1.5.5.7.3.6"],
   "allow_device_attestation": true,
   "required_attestation_formats": ["tpm"],
   "validate_ek_certificate": true
 }'
 
-# Cluster URL and ACME
-api_request POST "pki-vpn/config/cluster" '{"path": "http://openbao:8200/v1/pki-vpn", "aia_path": "http://openbao:8200/v1/pki-vpn"}'
-api_request POST "pki-vpn/config/acme" '{"enabled": true, "allowed_issuers": ["*"], "allowed_roles": ["*"], "eab_policy": "not-required"}'
+# Agent ACME config
+api_request POST "pki-agent/config/cluster" '{"path": "http://openbao:8200/v1/pki-agent", "aia_path": "http://openbao:8200/v1/pki-agent"}'
+api_request POST "pki-agent/config/acme" '{"enabled": true, "allowed_issuers": ["*"], "allowed_roles": ["*"], "eab_policy": "not-required"}'
 
-# Configure VPN PKI to trust the AK CA for attestation validation
-# Get the AK CA root certificate
-AK_CA_CERT=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-ak/ca/pem" 2>/dev/null)
-if [ -n "$AK_CA_CERT" ] && [ "$AK_CA_CERT" != "null" ]; then
-    echo "Configuring VPN PKI to trust AK CA for attestation..."
-    # Escape the certificate for JSON
-    AK_CA_CERT_ESCAPED=$(echo "$AK_CA_CERT" | jq -Rs .)
-    api_request POST "pki-vpn/config/acme/ak-ca-roots/ak-ca" "{\"certificate\": $AK_CA_CERT_ESCAPED}"
-fi
+# Usage CA (sign-verbatim via mTLS, no ACME)
+echo ""
+echo "Setting up Usage CA..."
+curl -s -X DELETE -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/sys/mounts/pki-usage" > /dev/null 2>&1 || true
+api_request POST "sys/mounts/pki-usage" '{"type": "pki", "config": {"max_lease_ttl": "87600h"}}'
+api_request POST "pki-usage/root/generate/internal" '{"common_name": "OpenBao Usage CA", "issuer_name": "usage-root-ca", "ttl": "87600h"}'
+
+# Usage roles - issued via sign-verbatim with mTLS authentication (1 day validity)
+api_request POST "pki-usage/roles/vpn" '{
+  "allow_any_name": true,
+  "enforce_hostnames": false,
+  "max_ttl": "24h",
+  "key_usage": ["DigitalSignature", "KeyEncipherment", "KeyAgreement"],
+  "ext_key_usage": ["ClientAuth"],
+  "ext_key_usage_oids": ["1.3.6.1.5.5.7.3.5", "1.3.6.1.5.5.7.3.6"]
+}'
+
+api_request POST "pki-usage/roles/wifi" '{
+  "allow_any_name": true,
+  "enforce_hostnames": false,
+  "max_ttl": "24h",
+  "key_usage": ["DigitalSignature"],
+  "ext_key_usage": ["ClientAuth"]
+}'
+
+api_request POST "pki-usage/roles/tls" '{
+  "allow_any_name": true,
+  "enforce_hostnames": false,
+  "max_ttl": "24h",
+  "key_usage": ["DigitalSignature"],
+  "ext_key_usage": ["ClientAuth"]
+}'
+
+# Export CA certificates for client/server mounting
+echo ""
+echo "Exporting CA certificates..."
+
+# gRPC CA - for client TLS verification
+GRPC_CA_CERT=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-grpc/ca/pem" 2>/dev/null)
+echo "$GRPC_CA_CERT" > /data/grpc-ca.pem
+chmod 644 /data/grpc-ca.pem
+echo "OK: Exported gRPC CA to /data/grpc-ca.pem"
+
+# Agent CA - for server mTLS validation
+AGENT_CA_CERT=$(curl -s -H "X-Vault-Token: $BAO_TOKEN" "$BAO_ADDR/v1/pki-agent/ca/pem" 2>/dev/null)
+echo "$AGENT_CA_CERT" > /data/agent-ca.pem
+chmod 644 /data/agent-ca.pem
+echo "OK: Exported Agent CA to /data/agent-ca.pem"
 
 echo ""
 echo "OpenBao initialized:"
 echo "  AK CA: /pki-ak (role: lak-device)"
-echo "  VPN CA: /pki-vpn (role: ipsec-vpn)"
-echo "  ACME: enabled"
-echo "  VPN PKI trusts AK CA for attestation"
+echo "  gRPC CA: /pki-grpc (role: server)"
+echo "  Agent CA: /pki-agent (role: agent, ACME enabled)"
+echo "  Usage CA: /pki-usage (roles: vpn, wifi, tls)"
+echo "  CA exports: /data/grpc-ca.pem, /data/agent-ca.pem"

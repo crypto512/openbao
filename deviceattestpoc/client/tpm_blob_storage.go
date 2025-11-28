@@ -9,12 +9,13 @@ import (
 	"path/filepath"
 )
 
-// TPMBlobStorage stores AK blobs and LAK certificate for device attestation
+// TPMBlobStorage stores AK blobs, LAK certificate, and agent certificate for device attestation
 // This is the persistent state saved to /etc/da.json
 //
 // Workflow:
 // 1. da-lak: Create AK -> MakeCredential/ActivateCredential -> Get LAK cert -> Save to da.json
-// 2. da-gen: Load AK + LAK cert from da.json -> Generate software key -> Attest -> Get certificate
+// 2. da-agent: Load AK + LAK cert -> ACME device-attest-01 -> Get agent cert -> Save to da.json
+// 3. da-gen: Load agent cert -> mTLS -> Get usage certificate
 type TPMBlobStorage struct {
 	// AK (Attestation Key) blobs - TPM2B_PRIVATE and TPM2B_PUBLIC
 	AKPrivate string `json:"ak_private"`
@@ -26,17 +27,23 @@ type TPMBlobStorage struct {
 	// LAK CA Chain - CA certificate that signed the LAK certificate
 	LAKCACertPEM string `json:"lak_ca_cert_pem,omitempty"`
 
+	// Agent certificate and key - hardware-bound via ACME device-attest-01
+	AgentCertPEM    string `json:"agent_cert_pem,omitempty"`
+	AgentKeyPrivate string `json:"agent_key_private,omitempty"` // TPM blob (base64)
+	AgentKeyPublic  string `json:"agent_key_public,omitempty"`  // TPM blob (base64)
+	AgentCACertPEM  string `json:"agent_ca_cert_pem,omitempty"`
+
 	// Metadata
 	Version     string `json:"version"`
 	Description string `json:"description"`
 }
 
 const (
-	blobStorageVersion = "2.0"
-	defaultBlobPath    = "/etc/da.json"
+	blobStorageVersion = "3.0"
+	defaultBlobPath    = "/etc/da/da.json"
 )
 
-// SaveBlobs saves AK blobs and LAK certificate to da.json
+// SaveBlobs saves AK blobs and LAK certificate to da.json (preserves agent data if present)
 func SaveBlobs(akPriv, akPub []byte, lakCertPEM, lakCACertPEM string) error {
 	blobPath := getBlobPath()
 	log.Printf("Saving TPM blobs to: %s", blobPath)
@@ -45,14 +52,21 @@ func SaveBlobs(akPriv, akPub []byte, lakCertPEM, lakCACertPEM string) error {
 		return fmt.Errorf("failed to create blob directory: %w", err)
 	}
 
+	// Load existing storage to preserve agent data
 	storage := TPMBlobStorage{
-		AKPrivate:    base64.StdEncoding.EncodeToString(akPriv),
-		AKPublic:     base64.StdEncoding.EncodeToString(akPub),
-		LAKCertPEM:   lakCertPEM,
-		LAKCACertPEM: lakCACertPEM,
-		Version:      blobStorageVersion,
-		Description:  "Device attestation state",
+		Version:     blobStorageVersion,
+		Description: "Device attestation state",
 	}
+	if jsonData, err := os.ReadFile(blobPath); err == nil {
+		json.Unmarshal(jsonData, &storage)
+	}
+
+	// Update AK and LAK data
+	storage.AKPrivate = base64.StdEncoding.EncodeToString(akPriv)
+	storage.AKPublic = base64.StdEncoding.EncodeToString(akPub)
+	storage.LAKCertPEM = lakCertPEM
+	storage.LAKCACertPEM = lakCACertPEM
+	storage.Version = blobStorageVersion
 
 	jsonData, err := json.MarshalIndent(storage, "", "  ")
 	if err != nil {
@@ -64,6 +78,40 @@ func SaveBlobs(akPriv, akPub []byte, lakCertPEM, lakCACertPEM string) error {
 	}
 
 	log.Printf("TPM blobs saved")
+	return nil
+}
+
+// SaveAgentBlobs saves agent certificate and key blobs to da.json (preserves AK/LAK data)
+func SaveAgentBlobs(agentCertPEM string, agentKeyPriv, agentKeyPub []byte, agentCACertPEM string) error {
+	blobPath := getBlobPath()
+	log.Printf("Saving agent blobs to: %s", blobPath)
+
+	// Load existing storage to preserve AK/LAK data
+	storage := TPMBlobStorage{
+		Version:     blobStorageVersion,
+		Description: "Device attestation state",
+	}
+	if jsonData, err := os.ReadFile(blobPath); err == nil {
+		json.Unmarshal(jsonData, &storage)
+	}
+
+	// Update agent data
+	storage.AgentCertPEM = agentCertPEM
+	storage.AgentKeyPrivate = base64.StdEncoding.EncodeToString(agentKeyPriv)
+	storage.AgentKeyPublic = base64.StdEncoding.EncodeToString(agentKeyPub)
+	storage.AgentCACertPEM = agentCACertPEM
+	storage.Version = blobStorageVersion
+
+	jsonData, err := json.MarshalIndent(storage, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal blob storage: %w", err)
+	}
+
+	if err := os.WriteFile(blobPath, jsonData, 0600); err != nil {
+		return fmt.Errorf("failed to write blob file: %w", err)
+	}
+
+	log.Printf("Agent blobs saved")
 	return nil
 }
 
@@ -87,7 +135,8 @@ func LoadBlobs() (akPriv, akPub []byte, lakCertPEM, lakCACertPEM string, exists 
 		return nil, nil, "", "", false, fmt.Errorf("failed to unmarshal blob storage: %w", err)
 	}
 
-	if storage.Version != blobStorageVersion {
+	// Accept version 2.0 and 3.0 for AK/LAK data
+	if storage.Version != blobStorageVersion && storage.Version != "2.0" {
 		log.Printf("Blob version mismatch (got %s, want %s), will recreate", storage.Version, blobStorageVersion)
 		return nil, nil, "", "", false, nil
 	}
@@ -104,6 +153,80 @@ func LoadBlobs() (akPriv, akPub []byte, lakCertPEM, lakCACertPEM string, exists 
 
 	log.Printf("TPM blobs loaded")
 	return akPriv, akPub, storage.LAKCertPEM, storage.LAKCACertPEM, true, nil
+}
+
+// LoadAgentBlobs loads agent certificate and key blobs from da.json
+func LoadAgentBlobs() (agentCertPEM string, agentKeyPriv, agentKeyPub []byte, agentCACertPEM string, exists bool, err error) {
+	blobPath := getBlobPath()
+
+	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
+		return "", nil, nil, "", false, nil
+	}
+
+	jsonData, err := os.ReadFile(blobPath)
+	if err != nil {
+		return "", nil, nil, "", false, fmt.Errorf("failed to read blob file: %w", err)
+	}
+
+	var storage TPMBlobStorage
+	if err := json.Unmarshal(jsonData, &storage); err != nil {
+		return "", nil, nil, "", false, fmt.Errorf("failed to unmarshal blob storage: %w", err)
+	}
+
+	// Agent blobs only exist in version 3.0
+	if storage.AgentCertPEM == "" || storage.AgentKeyPrivate == "" {
+		return "", nil, nil, "", false, nil
+	}
+
+	agentKeyPriv, err = base64.StdEncoding.DecodeString(storage.AgentKeyPrivate)
+	if err != nil {
+		return "", nil, nil, "", false, fmt.Errorf("failed to decode agent key private: %w", err)
+	}
+
+	agentKeyPub, err = base64.StdEncoding.DecodeString(storage.AgentKeyPublic)
+	if err != nil {
+		return "", nil, nil, "", false, fmt.Errorf("failed to decode agent key public: %w", err)
+	}
+
+	log.Printf("Agent blobs loaded")
+	return storage.AgentCertPEM, agentKeyPriv, agentKeyPub, storage.AgentCACertPEM, true, nil
+}
+
+// ClearAgentBlobs clears only the agent certificate and key data from da.json
+func ClearAgentBlobs() error {
+	blobPath := getBlobPath()
+
+	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	jsonData, err := os.ReadFile(blobPath)
+	if err != nil {
+		return fmt.Errorf("failed to read blob file: %w", err)
+	}
+
+	var storage TPMBlobStorage
+	if err := json.Unmarshal(jsonData, &storage); err != nil {
+		return fmt.Errorf("failed to unmarshal blob storage: %w", err)
+	}
+
+	// Clear agent data
+	storage.AgentCertPEM = ""
+	storage.AgentKeyPrivate = ""
+	storage.AgentKeyPublic = ""
+	storage.AgentCACertPEM = ""
+
+	newData, err := json.MarshalIndent(storage, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal blob storage: %w", err)
+	}
+
+	if err := os.WriteFile(blobPath, newData, 0600); err != nil {
+		return fmt.Errorf("failed to write blob file: %w", err)
+	}
+
+	log.Printf("Agent blobs cleared")
+	return nil
 }
 
 // ClearBlobs removes the da.json file
@@ -126,4 +249,15 @@ func getBlobPath() string {
 func BlobsExist() bool {
 	_, err := os.Stat(getBlobPath())
 	return err == nil
+}
+
+// AgentBlobsExist returns true if agent certificate and key are stored
+func AgentBlobsExist() bool {
+	_, _, _, _, exists, _ := LoadAgentBlobs()
+	return exists
+}
+
+// GetBlobPath returns the current blob path (for logging)
+func GetBlobPath() string {
+	return getBlobPath()
 }
