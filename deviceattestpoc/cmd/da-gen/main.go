@@ -30,6 +30,12 @@ type CertKeyBlobs struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+}
+
+func run() error {
 	usage := flag.String("usage", "", "Certificate usage (e.g., vpn)")
 	serverAddr := flag.String("server", "", "gRPC server address")
 	tpmDevice := flag.String("tpm", "", "TPM device path")
@@ -37,7 +43,7 @@ func main() {
 	flag.Parse()
 
 	if *usage == "" {
-		log.Fatalf("--usage is required (e.g., --usage vpn)")
+		return fmt.Errorf("--usage is required (e.g., --usage vpn)")
 	}
 
 	finalServerAddr := GetConfigString(*serverAddr, "GRPC_SERVER", "localhost:50051")
@@ -53,12 +59,12 @@ func main() {
 	// Initialize TPM client (loads AK + LAK from da.json)
 	tpmClient, err := NewTPMClient(finalTPMDevice)
 	if err != nil {
-		log.Fatalf("Failed to initialize TPM: %v", err)
+		return fmt.Errorf("failed to initialize TPM: %w", err)
 	}
 	defer tpmClient.Close()
 
 	if tpmClient.NeedsLAKProvisioning() {
-		log.Fatalf("LAK not provisioned. Run da-lak first.")
+		return fmt.Errorf("LAK not provisioned. Run da-lak first")
 	}
 
 	permanentID := tpmClient.GetPermanentID()
@@ -68,7 +74,7 @@ func main() {
 	log.Printf("Creating TPM-bound signing key...")
 	certKey, err := tpmClient.CreateCertKey()
 	if err != nil {
-		log.Fatalf("Failed to create TPM key: %v", err)
+		return fmt.Errorf("failed to create TPM key: %w", err)
 	}
 	defer tpmClient.CloseCertKey(certKey)
 
@@ -78,7 +84,7 @@ func main() {
 	// Connect to server
 	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Failed to connect to server: %v", err)
+		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 	defer conn.Close()
 
@@ -96,10 +102,10 @@ func main() {
 		Usage:               *usage,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create order: %v", err)
+		return fmt.Errorf("failed to create order: %w", err)
 	}
 	if resp.Status == "error" {
-		log.Fatalf("Order creation failed: %s", resp.Error)
+		return fmt.Errorf("order creation failed: %s", resp.Error)
 	}
 	log.Printf("ACME order created: %s", resp.OrderId)
 
@@ -108,7 +114,7 @@ func main() {
 	keyAuthorization := fmt.Sprintf("%s.%s", resp.ChallengeToken, resp.AccountThumbprint)
 	attestationObject, err := tpmClient.GenerateAttestation(certKey, keyAuthorization)
 	if err != nil {
-		log.Fatalf("Failed to generate attestation: %v", err)
+		return fmt.Errorf("failed to generate attestation: %w", err)
 	}
 
 	// Submit attestation
@@ -120,10 +126,10 @@ func main() {
 		AttestationObject: attestationObject,
 	})
 	if err != nil {
-		log.Fatalf("Failed to submit attestation: %v", err)
+		return fmt.Errorf("failed to submit attestation: %w", err)
 	}
 	if attResp.Status == "error" {
-		log.Fatalf("Attestation failed: %s", attResp.Error)
+		return fmt.Errorf("attestation failed: %s", attResp.Error)
 	}
 
 	// Wait for order to become ready
@@ -142,7 +148,7 @@ func main() {
 			break
 		}
 		if attempt == 10 {
-			log.Fatalf("Order not ready after 10 attempts, last status: %s", lastStatus)
+			return fmt.Errorf("order not ready after 10 attempts, last status: %s", lastStatus)
 		}
 		time.Sleep(1 * time.Second)
 	}
@@ -151,7 +157,7 @@ func main() {
 	log.Printf("Generating CSR (TPM-signed)...")
 	csrPEM, err := tpmClient.SignCSR(certKey, commonName, nil)
 	if err != nil {
-		log.Fatalf("Failed to generate CSR: %v", err)
+		return fmt.Errorf("failed to generate CSR: %w", err)
 	}
 
 	// Finalize order
@@ -161,10 +167,10 @@ func main() {
 		CsrPem:  csrPEM,
 	})
 	if err != nil {
-		log.Fatalf("Failed to finalize order: %v", err)
+		return fmt.Errorf("failed to finalize order: %w", err)
 	}
 	if finalizeResp.Status == "error" {
-		log.Fatalf("Order finalization failed: %s", finalizeResp.Error)
+		return fmt.Errorf("order finalization failed: %s", finalizeResp.Error)
 	}
 
 	// Retrieve certificate
@@ -176,14 +182,14 @@ func main() {
 			break
 		}
 		if attempt == 30 {
-			log.Fatalf("Certificate not ready after 30 attempts")
+			return fmt.Errorf("certificate not ready after 30 attempts")
 		}
 		time.Sleep(2 * time.Second)
 	}
 
 	// Write output files
 	if err := os.MkdirAll(finalOutputDir, 0755); err != nil {
-		log.Fatalf("Failed to create output directory: %v", err)
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
 	blobPath := filepath.Join(finalOutputDir, fmt.Sprintf("%s-key.blob", *usage))
@@ -197,19 +203,20 @@ func main() {
 	}
 	blobData, err := json.Marshal(keyBlobs)
 	if err != nil {
-		log.Fatalf("Failed to marshal key blobs: %v", err)
+		return fmt.Errorf("failed to marshal key blobs: %w", err)
 	}
 	if err := os.WriteFile(blobPath, blobData, 0600); err != nil {
-		log.Fatalf("Failed to write key blobs: %v", err)
+		return fmt.Errorf("failed to write key blobs: %w", err)
 	}
 
 	// Write certificate with full chain
 	if err := os.WriteFile(certPath, []byte(certResp.CertificatePem), 0644); err != nil {
-		log.Fatalf("Failed to write certificate: %v", err)
+		return fmt.Errorf("failed to write certificate: %w", err)
 	}
 
 	log.Printf("Certificate generated successfully!")
 	log.Printf("  Key blobs: %s (TPM-bound, use with this device only)", blobPath)
 	log.Printf("  Cert: %s", certPath)
 	log.Printf("  CN: %s", commonName)
+	return nil
 }

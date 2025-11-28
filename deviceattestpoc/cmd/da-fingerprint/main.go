@@ -24,24 +24,29 @@ import (
 )
 
 func main() {
+	log.SetFlags(0) // No timestamps for clean output
+	if err := run(); err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+}
+
+func run() error {
 	tpmDevice := flag.String("tpm", "", "TPM device path (default: /dev/tpmrm0)")
 	flag.Parse()
 
 	finalTPMDevice := getConfig(*tpmDevice, "TPM_DEVICE", "/dev/tpmrm0")
 
-	log.SetFlags(0) // No timestamps for clean output
-
 	// Open TPM
 	rwc, err := tpm2.OpenTPM(finalTPMDevice)
 	if err != nil {
-		log.Fatalf("Failed to open TPM at %s: %v", finalTPMDevice, err)
+		return fmt.Errorf("failed to open TPM at %s: %w", finalTPMDevice, err)
 	}
 	defer rwc.Close()
 
 	// Get EK
 	ek, err := client.EndorsementKeyRSA(rwc)
 	if err != nil {
-		log.Fatalf("Failed to get EK: %v", err)
+		return fmt.Errorf("failed to get EK: %w", err)
 	}
 	defer ek.Close()
 
@@ -58,11 +63,12 @@ func main() {
 	// Compute EK hash (permanent identifier)
 	ekHash, err := computeEKHash(pubKey)
 	if err != nil {
-		log.Fatalf("Failed to compute EK hash: %v", err)
+		return fmt.Errorf("failed to compute EK hash: %w", err)
 	}
 
 	// Output permanent identifier
 	fmt.Println(ekHash)
+	return nil
 }
 
 func getConfig(flagValue, envVar, defaultValue string) string {

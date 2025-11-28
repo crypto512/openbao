@@ -20,6 +20,12 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+}
+
+func run() error {
 	serverAddr := flag.String("server", "", "gRPC server address")
 	tpmDevice := flag.String("tpm", "", "TPM device path")
 	clear := flag.Bool("clear", false, "Clear existing da.json and re-provision")
@@ -34,14 +40,14 @@ func main() {
 
 	if *clear {
 		if err := ClearBlobs(); err != nil {
-			log.Fatalf("Failed to clear da.json: %v", err)
+			return fmt.Errorf("failed to clear da.json: %w", err)
 		}
 		log.Printf("da.json cleared")
 	}
 
 	tpmClient, err := NewTPMClient(finalTPMDevice)
 	if err != nil {
-		log.Fatalf("Failed to initialize TPM: %v", err)
+		return fmt.Errorf("failed to initialize TPM: %w", err)
 	}
 	defer tpmClient.Close()
 
@@ -51,12 +57,12 @@ func main() {
 	if !tpmClient.NeedsLAKProvisioning() {
 		log.Printf("LAK certificate already exists in da.json")
 		log.Printf("Use --clear to re-provision")
-		return
+		return nil
 	}
 
 	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Fatalf("Failed to connect to server: %v", err)
+		return fmt.Errorf("failed to connect to server: %w", err)
 	}
 	defer conn.Close()
 
@@ -71,10 +77,10 @@ func main() {
 		DeviceDescription: fmt.Sprintf("Device %s", permanentID[:8]),
 	})
 	if err != nil {
-		log.Fatalf("Failed to enroll TPM: %v", err)
+		return fmt.Errorf("failed to enroll TPM: %w", err)
 	}
 	if enrollResp.Status == "error" {
-		log.Fatalf("TPM enrollment failed: %s", enrollResp.Error)
+		return fmt.Errorf("TPM enrollment failed: %s", enrollResp.Error)
 	}
 	log.Printf("TPM enrolled: %s", enrollResp.PermanentIdentifier)
 
@@ -82,7 +88,7 @@ func main() {
 	log.Printf("Requesting credential challenge...")
 	akParams, ekPublic, err := tpmClient.GetAKActivationData()
 	if err != nil {
-		log.Fatalf("Failed to get AK activation data: %v", err)
+		return fmt.Errorf("failed to get AK activation data: %w", err)
 	}
 
 	provisionResp, err := client.ProvisionLAK(ctx, &pb.ProvisionLAKRequest{
@@ -92,17 +98,17 @@ func main() {
 		EkCertPem:           tpmClient.GetEKCertificatePEM(),
 	})
 	if err != nil {
-		log.Fatalf("Failed to request credential challenge: %v", err)
+		return fmt.Errorf("failed to request credential challenge: %w", err)
 	}
 	if provisionResp.Status != "challenge" {
-		log.Fatalf("Credential challenge failed: %s", provisionResp.Error)
+		return fmt.Errorf("credential challenge failed: %s", provisionResp.Error)
 	}
 
 	// Activate credential
 	log.Printf("Activating credential...")
 	decryptedSecret, err := tpmClient.ActivateCredentialChallenge(provisionResp.EncryptedCredential)
 	if err != nil {
-		log.Fatalf("TPM ActivateCredential failed: %v", err)
+		return fmt.Errorf("TPM ActivateCredential failed: %w", err)
 	}
 
 	activateResp, err := client.ActivateCredential(ctx, &pb.ActivateCredentialRequest{
@@ -110,19 +116,20 @@ func main() {
 		DecryptedSecret: decryptedSecret,
 	})
 	if err != nil {
-		log.Fatalf("Failed to activate credential: %v", err)
+		return fmt.Errorf("failed to activate credential: %w", err)
 	}
 	if activateResp.Status != "success" {
-		log.Fatalf("Credential activation failed: %s", activateResp.Error)
+		return fmt.Errorf("credential activation failed: %s", activateResp.Error)
 	}
 
 	// Store LAK certificate
 	if err := tpmClient.SetLAKCertificate(activateResp.LakCertificatePem, activateResp.LakRootCaPem); err != nil {
-		log.Fatalf("Failed to store LAK certificate: %v", err)
+		return fmt.Errorf("failed to store LAK certificate: %w", err)
 	}
 
 	log.Printf("LAK certificate provisioned successfully")
 	log.Printf("  Valid from: %s", activateResp.NotBefore)
 	log.Printf("  Valid until: %s", activateResp.NotAfter)
 	log.Printf("  Saved to: %s", GetDAConfigPath())
+	return nil
 }
