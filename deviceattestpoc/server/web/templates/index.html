@@ -1,0 +1,62 @@
+{{template "base.html" .}}
+
+{{define "content"}}
+<div hx-ext="sse" sse-connect="/events">
+    <!-- Status Panel -->
+    <div class="card" id="status-panel" hx-get="/api/status" hx-trigger="sse:status-update">
+        {{template "status_panel.html" .}}
+    </div>
+
+    <!-- Add Device Form -->
+    <div class="card">
+        <h2>Add Device</h2>
+        <form hx-post="/api/devices" hx-target="#device-list" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+            <div class="form-row">
+                <div class="form-group" style="flex: 2;">
+                    <label for="fingerprint">EK Hash / Fingerprint</label>
+                    <input type="text" id="fingerprint" name="fingerprint" placeholder="Base64-encoded EK hash from da-fingerprint" required>
+                </div>
+                <div class="form-group">
+                    <label for="description">Description</label>
+                    <input type="text" id="description" name="description" placeholder="Optional description">
+                </div>
+                <div class="form-group" style="flex: 0;">
+                    <button type="submit" class="btn btn-primary">Add Device</button>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <!-- Auto-Approve Toggle -->
+    <div class="card">
+        <label class="toggle">
+            <input type="checkbox" id="auto-approve"
+                   hx-put="/api/settings/auto-approve"
+                   hx-trigger="change"
+                   hx-headers='{"Content-Type": "application/json"}'
+                   hx-vals='js:{value: document.getElementById("auto-approve").checked}'
+                   {{if .AutoApprove}}checked{{end}}>
+            <span>Auto-approve new devices</span>
+        </label>
+        <p style="font-size: 0.875rem; color: var(--gray-500); margin-top: 8px;">
+            When enabled, devices are automatically enrolled without manual approval.
+        </p>
+    </div>
+
+    <!-- Device List -->
+    <div class="card">
+        <h2>Enrolled Devices</h2>
+        <div id="device-list" hx-get="/api/devices" hx-trigger="sse:device-update">
+            {{template "device_list.html" .Devices}}
+        </div>
+    </div>
+
+    <!-- Audit Log -->
+    <div class="card">
+        <h2>Recent Activity</h2>
+        <div id="audit-log" hx-get="/api/audit?limit=10" hx-trigger="sse:audit-update">
+            {{template "audit_log.html" .AuditLog}}
+        </div>
+    </div>
+</div>
+{{end}}

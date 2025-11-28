@@ -1,0 +1,32 @@
+{{define "audit_log.html"}}
+{{if .}}
+<div>
+    {{range .}}
+    <div class="audit-entry">
+        <div>
+            <span class="audit-event {{if .Success}}audit-success{{else}}audit-failure{{end}}">
+                {{eventLabel (printf "%s" .EventType)}}
+            </span>
+            {{if .EKHash}}
+            <span class="mono" style="font-size: 0.75rem; color: var(--gray-500); margin-left: 8px;">
+                {{truncate .EKHash 12}}
+            </span>
+            {{end}}
+            {{if .Details}}
+            <span style="font-size: 0.75rem; color: var(--gray-500); margin-left: 8px;">
+                — {{.Details}}
+            </span>
+            {{end}}
+        </div>
+        <div class="audit-time">
+            {{.Timestamp.Format "Jan 2, 15:04:05"}}
+        </div>
+    </div>
+    {{end}}
+</div>
+{{else}}
+<div class="empty-state" style="padding: 20px;">
+    <p style="font-size: 0.875rem;">No activity recorded yet.</p>
+</div>
+{{end}}
+{{end}}

@@ -36,6 +36,6 @@ RUN apk add --no-cache ca-certificates netcat-openbsd
 
 COPY --from=builder /server /server
 
-EXPOSE 50051
+EXPOSE 50051 8443
 
 ENTRYPOINT ["/server"]

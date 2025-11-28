@@ -42,10 +42,10 @@ The combination ensures:
 |                                                                    |
 |  +---------------+    +---------------+    +-------------------+   |
 |  |    SWTPM      |    |    Server     |    |     OpenBao       |   |
-|  |  (TPM 2.0)    |    |  (gRPC+mTLS)  |    |   (PKI + ACME)    |   |
+|  |  (TPM 2.0)    |    | (gRPC+Web+DB) |    |   (PKI + ACME)    |   |
 |  +-------+-------+    +-------+-------+    +---------+---------+   |
 |          |                    |                      |             |
-|     port 2321            port 50051             port 8200          |
+|     port 2321         port 50051/8443           port 8200          |
 +----------+--------------------+----------------------+-------------+
            |                    |                      |
            | TPM2 Commands      | gRPC/TLS/mTLS        | HTTP/ACME
@@ -331,13 +331,44 @@ Note: da-gen auto-refreshes expired LAK/agent certificates if needed (self-heali
 | `da-agent` | draft-acme-device-attest-07 | Provision agent cert via TPM attestation |
 | `da-gen` | mTLS | Generate usage certificates with agent cert (self-healing) |
 
-### Server (gRPC)
+### Server (gRPC + Web)
 
 - Validates EK certificates against manufacturer CAs (loaded from `/ca`)
 - Implements MakeCredential for LAK provisioning
 - Proxies ACME requests to OpenBao for agent certificates
 - Issues usage certificates via mTLS (validates agent cert from pki-agent CA)
 - TLS for LAK/agent provisioning, mTLS for certificate generation
+- **Web Interface** on port 8443 (same TLS certificate as gRPC)
+
+#### Web Interface (https://localhost:8443)
+
+The server provides an HTMX-based web interface for device management:
+
+| Feature | Description |
+|---------|-------------|
+| **Dashboard** | SPKI pin display, device counts, certificate status, activity metrics |
+| **Device List** | View all devices with status, LAK/Agent cert validity icons |
+| **Add Device** | Enroll devices by fingerprint (manual pre-approval) |
+| **Auto-Approve** | Toggle automatic enrollment of new devices (default: enabled) |
+| **Audit Log** | Full history of enrollment and certificate operations |
+| **Real-time Updates** | SSE-based live updates when device state changes |
+
+Device status progression: `pending_approval` → `enrolled` → `lak_issued` → `agent_cert_issued`
+
+Certificate validity icons:
+- 🟢 Green: Valid (>7 days remaining)
+- 🟡 Yellow: Expiring soon (<7 days)
+- 🔴 Red: Expired
+- ⚫ None: Not issued
+
+#### Data Persistence
+
+All server state is persisted in SQLite (`/data/db/devices.db`):
+- Device enrollment and certificate status
+- ACME orders and activation sessions
+- Audit log of all operations
+- Server settings (auto-approve, SPKI)
+- Server TLS certificate (cached until expiry)
 
 ### OpenBao PKI Configuration
 
@@ -389,7 +420,7 @@ Software TPM 2.0 emulator (libtpms + swtpm):
 
 ## Limitations (PoC)
 
-- No device allowlist enforcement (all enrolled devices accepted)
 - Empty authorization values for TPM keys
 - No PCR binding for measured boot
 - SWTPM keys are in container memory (use hardware TPM for production)
+- Web interface has no authentication (relies on network isolation)

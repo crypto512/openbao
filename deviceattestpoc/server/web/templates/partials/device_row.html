@@ -1,0 +1,39 @@
+{{define "device_row.html"}}
+<tr id="device-{{.ID}}">
+    <td>
+        <span class="mono" title="{{.EKHash}}">{{truncate .EKHash 20}}</span>
+    </td>
+    <td>{{if .Description}}{{.Description}}{{else}}<span style="color: var(--gray-400);">-</span>{{end}}</td>
+    <td>
+        <span class="badge {{statusBadgeClass (printf "%s" .Status)}}">{{statusLabel (printf "%s" .Status)}}</span>
+    </td>
+    <td>
+        <span class="cert-icon cert-{{certStatus .LAKNotAfter}}" title="{{formatTime .LAKNotAfter}}"></span>
+    </td>
+    <td>
+        <span class="cert-icon cert-{{certStatus .AgentCertNotAfter}}" title="{{formatTime .AgentCertNotAfter}}"></span>
+    </td>
+    <td style="font-size: 0.875rem; color: var(--gray-500);">
+        {{.CreatedAt.Format "Jan 2, 15:04"}}
+    </td>
+    <td>
+        <div class="actions">
+            {{if eq (printf "%s" .Status) "pending_approval"}}
+            <button class="btn btn-primary btn-sm"
+                    hx-post="/api/devices/{{.ID}}/approve"
+                    hx-target="#device-list"
+                    hx-swap="innerHTML">
+                Approve
+            </button>
+            {{end}}
+            <button class="btn btn-danger btn-sm"
+                    hx-delete="/api/devices/{{.ID}}"
+                    hx-target="#device-{{.ID}}"
+                    hx-swap="outerHTML"
+                    hx-confirm="Are you sure you want to delete this device?">
+                Delete
+            </button>
+        </div>
+    </td>
+</tr>
+{{end}}

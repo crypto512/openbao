@@ -1,0 +1,27 @@
+{{define "device_list.html"}}
+{{if .}}
+<table>
+    <thead>
+        <tr>
+            <th>Fingerprint</th>
+            <th>Description</th>
+            <th>Status</th>
+            <th>LAK</th>
+            <th>Agent</th>
+            <th>Created</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {{range .}}
+        {{template "device_row.html" .}}
+        {{end}}
+    </tbody>
+</table>
+{{else}}
+<div class="empty-state">
+    <p>No devices enrolled yet.</p>
+    <p style="font-size: 0.875rem; margin-top: 8px;">Add a device using the form above or run <code>da-init</code> on a client.</p>
+</div>
+{{end}}
+{{end}}

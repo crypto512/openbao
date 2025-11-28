@@ -68,8 +68,12 @@ func ExtractPermanentIDFromCert(cert *x509.Certificate) string {
 			return strings.TrimPrefix(uri.String(), "urn:permanent-identifier:")
 		}
 	}
-	// Fallback to CN if no URI SAN
-	return cert.Subject.CommonName
+	// Fallback to CN if no URI SAN, strip "agent-" prefix if present
+	cn := cert.Subject.CommonName
+	if strings.HasPrefix(cn, "agent-") {
+		return strings.TrimPrefix(cn, "agent-")
+	}
+	return cn
 }
 
 // MTLSUnaryInterceptor enforces mTLS for specific RPCs

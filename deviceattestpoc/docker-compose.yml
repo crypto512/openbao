@@ -65,6 +65,7 @@ services:
       - attestation-net
 
   # gRPC Server - Proxies certificate requests to OpenBao ACME API
+  # Web interface available on port 8443
   server:
     build:
       context: .
@@ -73,17 +74,21 @@ services:
     hostname: server
     ports:
       - "50051:50051"
+      - "8443:8443"
     depends_on:
       init:
         condition: service_completed_successfully
     environment:
       - BAO_ADDR=http://openbao:8200
       - GRPC_PORT=50051
+      - WEB_PORT=8443
+      - DB_PATH=/data/db/devices.db
       - LOG_LEVEL=debug
       - BAO_KEYS_FILE=/openbao-data/openbao-keys.json
     volumes:
       - ./ca:/ca:ro
       - server-acme-accounts:/data/acme-accounts
+      - server-db:/data/db
       - openbao-data:/openbao-data:ro
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "50051"]
@@ -157,3 +162,4 @@ volumes:
   client-hw-da-config:
   swtpm-state:
   server-acme-accounts:
+  server-db:
