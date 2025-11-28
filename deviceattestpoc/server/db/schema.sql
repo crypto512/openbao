@@ -106,6 +106,19 @@ CREATE TABLE IF NOT EXISTS server_certificates (
 CREATE INDEX IF NOT EXISTS idx_server_certs_name ON server_certificates(name);
 CREATE INDEX IF NOT EXISTS idx_server_certs_expires ON server_certificates(not_after);
 
+-- ACME accounts table: replaces filesystem-based account storage
+CREATE TABLE IF NOT EXISTS acme_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pki_path TEXT UNIQUE NOT NULL,
+    private_key_pem TEXT NOT NULL,
+    account_url TEXT,
+    thumbprint TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_acme_accounts_pki_path ON acme_accounts(pki_path);
+
 -- Initialize default settings
 INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_approve', 'true');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('server_spki', '');

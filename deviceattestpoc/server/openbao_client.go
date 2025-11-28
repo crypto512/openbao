@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/openbao/openbao/deviceattestpoc/server/db"
 )
 
 type OpenBaoClient struct {
@@ -42,8 +44,8 @@ type ACMEOrder struct {
 	CertificateURL    string
 }
 
-func NewOpenBaoClient(baseURL, token string) (*OpenBaoClient, error) {
-	accountManager, err := NewACMEAccountManager("/data/acme-accounts")
+func NewOpenBaoClient(baseURL, token string, database *db.DB) (*OpenBaoClient, error) {
+	accountManager, err := NewACMEAccountManager(database)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create account manager: %w", err)
 	}
@@ -55,7 +57,7 @@ func NewOpenBaoClient(baseURL, token string) (*OpenBaoClient, error) {
 		accountManager: accountManager,
 	}
 
-	log.Printf("OpenBao client initialized with account persistence")
+	log.Printf("OpenBao client initialized with database-backed account persistence")
 	return client, nil
 }
 

@@ -590,7 +590,7 @@ func main() {
 		log.Fatalf("Failed to load EK CAs: %v", err)
 	}
 
-	openbaoClient, err := NewOpenBaoClient(baoAddr, baoToken)
+	openbaoClient, err := NewOpenBaoClient(baoAddr, baoToken, database)
 	if err != nil {
 		log.Fatalf("Failed to create OpenBao client: %v", err)
 	}

@@ -87,7 +87,6 @@ services:
       - BAO_KEYS_FILE=/openbao-data/openbao-keys.json
     volumes:
       - ./ca:/ca:ro
-      - server-acme-accounts:/data/acme-accounts
       - server-db:/data/db
       - openbao-data:/openbao-data:ro
     healthcheck:
@@ -161,5 +160,4 @@ volumes:
   client-da-config:
   client-hw-da-config:
   swtpm-state:
-  server-acme-accounts:
   server-db:

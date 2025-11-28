@@ -11,26 +11,26 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"sync"
+
+	"github.com/openbao/openbao/deviceattestpoc/server/db"
 )
 
 // ACMEAccountManager manages ACME accounts per PKI/role endpoint
-// Accounts are persisted to disk to ensure stable thumbprints across restarts
+// Accounts are persisted to the database to ensure stable thumbprints across restarts
 type ACMEAccountManager struct {
-	mu           sync.RWMutex
-	accounts     map[string]*ACMEAccount // key: PKI path (e.g., "pki-agent/roles/agent")
-	storagePath  string
+	mu       sync.RWMutex
+	accounts map[string]*ACMEAccount // in-memory cache, key: PKI path
+	db       *db.DB
 }
 
 // ACMEAccount represents a persisted ACME account
 type ACMEAccount struct {
-	PrivateKey  *ecdsa.PrivateKey `json:"-"`
-	PrivateKeyPEM string          `json:"private_key_pem"`
-	AccountURL  string            `json:"account_url"`
-	Thumbprint  string            `json:"thumbprint"`
-	PKIPath     string            `json:"pki_path"`
+	PrivateKey    *ecdsa.PrivateKey `json:"-"`
+	PrivateKeyPEM string            `json:"private_key_pem"`
+	AccountURL    string            `json:"account_url"`
+	Thumbprint    string            `json:"thumbprint"`
+	PKIPath       string            `json:"pki_path"`
 }
 
 // UsageConfig maps a usage name to PKI configuration
@@ -47,22 +47,14 @@ var usageMappings = map[string]UsageConfig{
 	"agent": {PKIPath: "pki-agent", Role: "agent"},
 }
 
-// NewACMEAccountManager creates a new account manager with persistence
-func NewACMEAccountManager(storagePath string) (*ACMEAccountManager, error) {
-	if storagePath == "" {
-		storagePath = "/data/acme-accounts"
-	}
-
-	if err := os.MkdirAll(storagePath, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create account storage directory: %w", err)
-	}
-
+// NewACMEAccountManager creates a new account manager with database persistence
+func NewACMEAccountManager(database *db.DB) (*ACMEAccountManager, error) {
 	mgr := &ACMEAccountManager{
-		accounts:    make(map[string]*ACMEAccount),
-		storagePath: storagePath,
+		accounts: make(map[string]*ACMEAccount),
+		db:       database,
 	}
 
-	// Load existing accounts from disk
+	// Load existing accounts from database
 	if err := mgr.loadAccounts(); err != nil {
 		log.Printf("Warning: failed to load existing accounts: %v", err)
 	}
@@ -89,21 +81,29 @@ func (m *ACMEAccountManager) GetOrCreateAccount(pkiPath string) (*ACMEAccount, e
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if account exists in memory
+	// Check if account exists in memory cache
 	if account, ok := m.accounts[pkiPath]; ok {
 		return account, nil
 	}
 
-	// Try to load from disk
-	account, err := m.loadAccount(pkiPath)
-	if err == nil && account != nil {
+	// Try to load from database
+	row, err := m.db.GetACMEAccount(pkiPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query database: %w", err)
+	}
+
+	if row != nil {
+		account, err := m.rowToAccount(row)
+		if err != nil {
+			return nil, err
+		}
 		m.accounts[pkiPath] = account
 		log.Printf("Loaded existing ACME account for %s (thumbprint: %s)", pkiPath, account.Thumbprint)
 		return account, nil
 	}
 
 	// Create new account
-	account, err = m.createAccount(pkiPath)
+	account, err := m.createAccount(pkiPath)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func (m *ACMEAccountManager) GetOrCreateAccount(pkiPath string) (*ACMEAccount, e
 	m.accounts[pkiPath] = account
 	log.Printf("Created new ACME account for %s (thumbprint: %s)", pkiPath, account.Thumbprint)
 
-	// Persist to disk
+	// Persist to database
 	if err := m.saveAccount(account); err != nil {
 		log.Printf("Warning: failed to persist account: %v", err)
 	}
@@ -185,50 +185,21 @@ func (m *ACMEAccountManager) SetAccountURL(pkiPath, accountURL string) error {
 	return m.saveAccount(account)
 }
 
-// accountFilePath returns the file path for an account
-func (m *ACMEAccountManager) accountFilePath(pkiPath string) string {
-	// Replace slashes with underscores for filename
-	safeName := ""
-	for _, c := range pkiPath {
-		if c == '/' {
-			safeName += "_"
-		} else {
-			safeName += string(c)
-		}
-	}
-	return filepath.Join(m.storagePath, safeName+".json")
-}
-
-// saveAccount persists an account to disk
+// saveAccount persists an account to the database
 func (m *ACMEAccountManager) saveAccount(account *ACMEAccount) error {
-	data, err := json.MarshalIndent(account, "", "  ")
-	if err != nil {
-		return err
+	row := &db.ACMEAccountRow{
+		PKIPath:       account.PKIPath,
+		PrivateKeyPEM: account.PrivateKeyPEM,
+		AccountURL:    account.AccountURL,
+		Thumbprint:    account.Thumbprint,
 	}
-
-	filePath := m.accountFilePath(account.PKIPath)
-	return os.WriteFile(filePath, data, 0600)
+	return m.db.SaveACMEAccount(row)
 }
 
-// loadAccount loads an account from disk
-func (m *ACMEAccountManager) loadAccount(pkiPath string) (*ACMEAccount, error) {
-	filePath := m.accountFilePath(pkiPath)
-
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var account ACMEAccount
-	if err := json.Unmarshal(data, &account); err != nil {
-		return nil, err
-	}
-
+// rowToAccount converts a database row to an ACMEAccount
+func (m *ACMEAccountManager) rowToAccount(row *db.ACMEAccountRow) (*ACMEAccount, error) {
 	// Parse private key from PEM
-	block, _ := pem.Decode([]byte(account.PrivateKeyPEM))
+	block, _ := pem.Decode([]byte(row.PrivateKeyPEM))
 	if block == nil {
 		return nil, fmt.Errorf("failed to decode private key PEM")
 	}
@@ -238,53 +209,29 @@ func (m *ACMEAccountManager) loadAccount(pkiPath string) (*ACMEAccount, error) {
 		return nil, fmt.Errorf("failed to parse private key: %w", err)
 	}
 
-	account.PrivateKey = privateKey
-	return &account, nil
+	return &ACMEAccount{
+		PrivateKey:    privateKey,
+		PrivateKeyPEM: row.PrivateKeyPEM,
+		AccountURL:    row.AccountURL,
+		Thumbprint:    row.Thumbprint,
+		PKIPath:       row.PKIPath,
+	}, nil
 }
 
-// loadAccounts loads all accounts from disk
+// loadAccounts loads all accounts from the database into memory
 func (m *ACMEAccountManager) loadAccounts() error {
-	entries, err := os.ReadDir(m.storagePath)
+	rows, err := m.db.ListACMEAccounts()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-
-		filePath := filepath.Join(m.storagePath, entry.Name())
-		data, err := os.ReadFile(filePath)
+	for _, row := range rows {
+		account, err := m.rowToAccount(row)
 		if err != nil {
-			log.Printf("Warning: failed to read account file %s: %v", filePath, err)
+			log.Printf("Warning: failed to parse account for %s: %v", row.PKIPath, err)
 			continue
 		}
-
-		var account ACMEAccount
-		if err := json.Unmarshal(data, &account); err != nil {
-			log.Printf("Warning: failed to parse account file %s: %v", filePath, err)
-			continue
-		}
-
-		// Parse private key
-		block, _ := pem.Decode([]byte(account.PrivateKeyPEM))
-		if block == nil {
-			log.Printf("Warning: failed to decode private key in %s", filePath)
-			continue
-		}
-
-		privateKey, err := x509.ParseECPrivateKey(block.Bytes)
-		if err != nil {
-			log.Printf("Warning: failed to parse private key in %s: %v", filePath, err)
-			continue
-		}
-
-		account.PrivateKey = privateKey
-		m.accounts[account.PKIPath] = &account
+		m.accounts[account.PKIPath] = account
 		log.Printf("Loaded ACME account: %s (thumbprint: %s)", account.PKIPath, account.Thumbprint)
 	}
 
@@ -311,5 +258,5 @@ func (m *ACMEAccountManager) ClearAccountURL(pkiPath string) error {
 
 	account.AccountURL = ""
 	log.Printf("Cleared account URL for %s (will re-register)", pkiPath)
-	return m.saveAccount(account)
+	return m.db.ClearACMEAccountURL(pkiPath)
 }
