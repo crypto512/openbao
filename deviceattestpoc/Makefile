@@ -1,7 +1,7 @@
 # Makefile for ACME Device Attestation PoC
-# Device attestation tools: da-fingerprint, da-lak, da-agent, da-gen
+# Device attestation tools: da-init, da-fingerprint, da-lak, da-agent, da-gen
 
-.PHONY: help build bin clean clean-client clean-pki clean-swtpm run-server da-fingerprint da-lak da-agent da-gen
+.PHONY: help build bin clean clean-client clean-pki clean-swtpm run-server da-init da-fingerprint da-lak da-agent da-gen
 
 help:
 	@echo "ACME Device Attestation PoC - Make targets:"
@@ -18,12 +18,14 @@ help:
 	@echo "  make run-server           - Start server infrastructure (OpenBao + gRPC + SWTPM)"
 	@echo ""
 	@echo "Device Attestation Tools:"
-	@echo "  make da-fingerprint       - Display permanent identifier (EK hash)"
+	@echo "  make da-init              - Bootstrap device trust (--force, no SPKI check)"
+	@echo "  make da-fingerprint       - Display TPM EK fingerprint"
 	@echo "  make da-lak               - Provision LAK certificate"
 	@echo "  make da-agent             - Provision agent certificate (ACME device-attest-01)"
 	@echo "  make da-gen USAGE=<name> [OUTPUT=<dir>] - Generate usage certificate"
 	@echo ""
 	@echo "Examples:"
+	@echo "  make da-init                            # Uses --force (dev/testing)"
 	@echo "  make da-fingerprint"
 	@echo "  make da-lak"
 	@echo "  make da-agent"
@@ -44,6 +46,7 @@ bin: build
 	@mkdir -p bin
 	@docker create --name da-bin-extract deviceattestpoc-client true 2>/dev/null || \
 		(docker rm -f da-bin-extract 2>/dev/null && docker create --name da-bin-extract deviceattestpoc-client true)
+	@docker cp da-bin-extract:/bin/da-init bin/
 	@docker cp da-bin-extract:/bin/da-fingerprint bin/
 	@docker cp da-bin-extract:/bin/da-lak bin/
 	@docker cp da-bin-extract:/bin/da-agent bin/
@@ -91,12 +94,27 @@ run-server:
 	@echo "  - gRPC certificate server"
 	@echo "  - Software TPM 2.0 (SWTPM)"
 	@echo ""
+	@echo "Watch for the SPKI Pin in the server logs!"
+	@echo ""
 	@docker compose up openbao init server tpm1
 
-# Display permanent identifier (EK hash)
+# Bootstrap device trust (uses --force by default for dev/testing)
+# For production with SPKI verification, run manually:
+#   docker compose run --rm client /bin/da-init <server> <spki-pin>
+da-init:
+	@echo "Bootstrapping device trust (--force mode)..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client /bin/da-init --force server:50051
+	@echo "✓ Device initialized"
+
+# Display TPM EK fingerprint
 da-fingerprint:
-	@echo "Device Permanent Identifier:"
+	@echo "Reading TPM EK fingerprint..."
+	@docker compose up -d tpm1
+	@sleep 2
 	@docker compose run --rm client /bin/da-fingerprint
+	@echo ""
 
 # Provision LAK certificate
 da-lak:

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // TPMBlobStorage stores AK blobs, LAK certificate, and agent certificate for device attestation
@@ -32,6 +35,13 @@ type TPMBlobStorage struct {
 	AgentKeyPrivate string `json:"agent_key_private,omitempty"` // TPM blob (base64)
 	AgentKeyPublic  string `json:"agent_key_public,omitempty"`  // TPM blob (base64)
 	AgentCACertPEM  string `json:"agent_ca_cert_pem,omitempty"`
+
+	// Server connection (set by da-init)
+	ServerAddress string `json:"server_address,omitempty"` // e.g., "grpc-server:50051"
+
+	// Server CA trust (persisted after TOFU)
+	ServerCAPEM string `json:"server_ca_pem,omitempty"` // Full CA chain PEM
+	ServerSPKI  string `json:"server_spki,omitempty"`   // SPKI pin for verification
 
 	// Metadata
 	Version     string `json:"version"`
@@ -260,4 +270,169 @@ func AgentBlobsExist() bool {
 // GetBlobPath returns the current blob path (for logging)
 func GetBlobPath() string {
 	return getBlobPath()
+}
+
+// LoadServerConfig loads server address, CA PEM, and SPKI pin from da.json
+func LoadServerConfig() (address, caPEM, spkiPin string, exists bool, err error) {
+	blobPath := getBlobPath()
+
+	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
+		return "", "", "", false, nil
+	}
+
+	jsonData, err := os.ReadFile(blobPath)
+	if err != nil {
+		return "", "", "", false, fmt.Errorf("failed to read blob file: %w", err)
+	}
+
+	var storage TPMBlobStorage
+	if err := json.Unmarshal(jsonData, &storage); err != nil {
+		return "", "", "", false, fmt.Errorf("failed to unmarshal blob storage: %w", err)
+	}
+
+	// Server config exists if address and CA are set
+	if storage.ServerAddress == "" || storage.ServerCAPEM == "" {
+		return "", "", "", false, nil
+	}
+
+	return storage.ServerAddress, storage.ServerCAPEM, storage.ServerSPKI, true, nil
+}
+
+// SaveServerConfig saves server address, CA PEM, and SPKI pin to da.json (preserves other data)
+func SaveServerConfig(address, caPEM, spkiPin string) error {
+	blobPath := getBlobPath()
+	log.Printf("Saving server config to: %s", blobPath)
+
+	if err := os.MkdirAll(filepath.Dir(blobPath), 0755); err != nil {
+		return fmt.Errorf("failed to create blob directory: %w", err)
+	}
+
+	// Load existing storage to preserve other data
+	storage := TPMBlobStorage{
+		Version:     blobStorageVersion,
+		Description: "Device attestation state",
+	}
+	if jsonData, err := os.ReadFile(blobPath); err == nil {
+		json.Unmarshal(jsonData, &storage)
+	}
+
+	// Update server config
+	storage.ServerAddress = address
+	storage.ServerCAPEM = caPEM
+	storage.ServerSPKI = spkiPin
+	storage.Version = blobStorageVersion
+
+	jsonData, err := json.MarshalIndent(storage, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal blob storage: %w", err)
+	}
+
+	if err := os.WriteFile(blobPath, jsonData, 0600); err != nil {
+		return fmt.Errorf("failed to write blob file: %w", err)
+	}
+
+	log.Printf("Server config saved")
+	return nil
+}
+
+// ServerConfigExists returns true if server config is stored
+func ServerConfigExists() bool {
+	_, _, _, exists, _ := LoadServerConfig()
+	return exists
+}
+
+// ClearLAKBlobs clears only the LAK certificate data from da.json (preserves AK, agent, and server config)
+func ClearLAKBlobs() error {
+	blobPath := getBlobPath()
+
+	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
+		return nil
+	}
+
+	jsonData, err := os.ReadFile(blobPath)
+	if err != nil {
+		return fmt.Errorf("failed to read blob file: %w", err)
+	}
+
+	var storage TPMBlobStorage
+	if err := json.Unmarshal(jsonData, &storage); err != nil {
+		return fmt.Errorf("failed to unmarshal blob storage: %w", err)
+	}
+
+	// Clear LAK and AK data (AK needs to be recreated with LAK)
+	storage.AKPrivate = ""
+	storage.AKPublic = ""
+	storage.LAKCertPEM = ""
+	storage.LAKCACertPEM = ""
+
+	newData, err := json.MarshalIndent(storage, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal blob storage: %w", err)
+	}
+
+	if err := os.WriteFile(blobPath, newData, 0600); err != nil {
+		return fmt.Errorf("failed to write blob file: %w", err)
+	}
+
+	log.Printf("LAK blobs cleared")
+	return nil
+}
+
+// IsLAKValid checks if the LAK certificate exists and is not expired
+func IsLAKValid() bool {
+	_, _, lakCertPEM, _, exists, err := LoadBlobs()
+	if err != nil || !exists || lakCertPEM == "" {
+		return false
+	}
+
+	cert, err := parsePEMCertificate(lakCertPEM)
+	if err != nil {
+		log.Printf("Failed to parse LAK certificate: %v", err)
+		return false
+	}
+
+	// Check expiry with some buffer (1 hour)
+	if time.Now().Add(time.Hour).After(cert.NotAfter) {
+		log.Printf("LAK certificate expired or expiring soon: %v", cert.NotAfter)
+		return false
+	}
+
+	return true
+}
+
+// IsAgentValid checks if the agent certificate exists and is not expired
+func IsAgentValid() bool {
+	agentCertPEM, _, _, _, exists, err := LoadAgentBlobs()
+	if err != nil || !exists || agentCertPEM == "" {
+		return false
+	}
+
+	cert, err := parsePEMCertificate(agentCertPEM)
+	if err != nil {
+		log.Printf("Failed to parse agent certificate: %v", err)
+		return false
+	}
+
+	// Check expiry with some buffer (1 hour)
+	if time.Now().Add(time.Hour).After(cert.NotAfter) {
+		log.Printf("Agent certificate expired or expiring soon: %v", cert.NotAfter)
+		return false
+	}
+
+	return true
+}
+
+// parsePEMCertificate parses a PEM-encoded certificate
+func parsePEMCertificate(pemData string) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(pemData))
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block")
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+// LAKBlobsExist returns true if LAK certificate is stored
+func LAKBlobsExist() bool {
+	_, _, lakCertPEM, _, exists, _ := LoadBlobs()
+	return exists && lakCertPEM != ""
 }

@@ -1,8 +1,8 @@
 // da-agent provisions an agent certificate via ACME device-attest-01
 // This is the bootstrap phase that creates a hardware-bound identity certificate.
-// Prerequisites: LAK must be provisioned via da-lak first.
+// Prerequisites: da-init and da-lak must be run first.
 //
-// Usage: da-agent [--server localhost:50051] [--tpm /dev/tpmrm0] [--clear]
+// Usage: da-agent [--tpm /dev/tpmrm0] [--clear]
 package main
 
 import (
@@ -23,20 +23,24 @@ func main() {
 }
 
 func run() error {
-	serverAddr := flag.String("server", "", "gRPC server address")
 	tpmDevice := flag.String("tpm", "", "TPM device path")
 	clear := flag.Bool("clear", false, "Clear existing agent cert and re-provision")
-	serverCA := flag.String("server-ca", "", "Server CA certificate for TLS")
 	flag.Parse()
 
-	finalServerAddr := GetConfigString(*serverAddr, "GRPC_SERVER", "localhost:50051")
 	finalTPMDevice := GetConfigString(*tpmDevice, "TPM_DEVICE", "/dev/tpmrm0")
-	finalServerCA := GetConfigString(*serverCA, "SERVER_CA_PATH", "/openbao-data/grpc-ca.pem")
+
+	// Load server config from da.json
+	serverAddr, serverCAPEM, _, exists, err := LoadServerConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load server config: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("server not configured. Run da-init first")
+	}
 
 	log.Printf("da-agent: Agent Certificate Provisioning (ACME device-attest-01)")
-	log.Printf("Server: %s", finalServerAddr)
+	log.Printf("Server: %s", serverAddr)
 	log.Printf("TPM: %s", finalTPMDevice)
-	log.Printf("Server CA: %s", finalServerCA)
 
 	// Initialize TPM client
 	tpmClient, err := NewTPMClient(finalTPMDevice)
@@ -75,13 +79,13 @@ func run() error {
 	}
 	defer tpmClient.CloseCertKey(certKey)
 
-	// Connect to server via TLS (server verification only, no client cert yet)
-	creds, err := NewTLSCredentials(finalServerCA)
+	// Connect to server via TLS using stored CA
+	creds, err := NewTLSCredentialsFromPEM(serverCAPEM)
 	if err != nil {
 		return fmt.Errorf("failed to create TLS credentials: %w", err)
 	}
 
-	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -19,6 +21,21 @@ import (
 	pb "github.com/openbao/openbao/deviceattestpoc/proto"
 	"google.golang.org/grpc"
 )
+
+// computeSPKIPinFromPEM computes the SPKI pin from a PEM-encoded certificate
+// Returns format: sha256//<base64-encoded-hash>
+func computeSPKIPinFromPEM(certPEM string) string {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return "error: failed to parse certificate PEM"
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err)
+	}
+	hash := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return "sha256//" + base64.StdEncoding.EncodeToString(hash[:])
+}
 
 // readTokenFromKeysFile reads the root token from the OpenBao keys file
 func readTokenFromKeysFile(path string) (string, error) {
@@ -512,6 +529,14 @@ func main() {
 		log.Fatalf("Failed to get server TLS certificate: %v", err)
 	}
 	log.Printf("Server TLS certificate obtained from OpenBao")
+
+	// Compute and display SPKI pin for TOFU bootstrap
+	spkiPin := computeSPKIPinFromPEM(certPEM)
+	log.Printf("")
+	log.Printf("═══════════════════════════════════════════════════════════")
+	log.Printf("Server SPKI Pin: %s", spkiPin)
+	log.Printf("═══════════════════════════════════════════════════════════")
+	log.Printf("")
 
 	// Create TLS credentials with optional mTLS
 	creds, err := NewServerTLSCredentials(certPEM, keyPEM, agentCAPool)

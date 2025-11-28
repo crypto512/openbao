@@ -107,19 +107,15 @@ services:
       server:
         condition: service_healthy
     environment:
-      - GRPC_SERVER=server:50051
       - LOG_LEVEL=debug
       - TPM2TOOLS_TCTI=swtpm:host=tpm1,port=2321
       - TPM_SWTPM_HOST=tpm1
       - TPM_SWTPM_PORT=2321
       - DA_JSON_PATH=/etc/da/da.json
       - DA_OUTPUT_DIR=/certs
-      - SERVER_CA_PATH=/openbao-data/grpc-ca.pem
     volumes:
       - client-certs:/certs
       - client-da-config:/etc/da
-      - ./ca:/ca:ro
-      - openbao-data:/openbao-data:ro
     networks:
       - attestation-net
 
@@ -134,12 +130,10 @@ services:
       server:
         condition: service_started
     environment:
-      - GRPC_SERVER=server:50051
       - LOG_LEVEL=debug
       - TPM2TOOLS_TCTI=device:/dev/tpmrm0
       - DA_JSON_PATH=/etc/da/da.json
       - DA_OUTPUT_DIR=/certs
-      - SERVER_CA_PATH=/openbao-data/grpc-ca.pem
     devices:
       - /dev/tpm0:/dev/tpm0
       - /dev/tpmrm0:/dev/tpmrm0
@@ -147,8 +141,6 @@ services:
     volumes:
       - client-certs:/certs
       - client-hw-da-config:/etc/da
-      - ./ca:/ca:ro
-      - openbao-data:/openbao-data:ro
     networks:
       - attestation-net
     profiles:

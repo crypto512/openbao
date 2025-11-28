@@ -1,7 +1,9 @@
 // da-lak provisions a Local Attestation Key (LAK) certificate
 // This is a one-time setup that stores AK blobs and LAK certificate to /etc/da.json
 //
-// Usage: da-lak [--server localhost:50051] [--tpm /dev/tpmrm0] [--clear]
+// Usage: da-lak [--tpm /dev/tpmrm0] [--clear]
+//
+// Prerequisites: da-init must be run first to configure server trust.
 //
 // The LAK certificate binds the AK public key to the device identity and is
 // issued by the Privacy CA after successful credential activation.
@@ -25,26 +27,30 @@ func main() {
 }
 
 func run() error {
-	serverAddr := flag.String("server", "", "gRPC server address")
 	tpmDevice := flag.String("tpm", "", "TPM device path")
-	clear := flag.Bool("clear", false, "Clear existing da.json and re-provision")
-	serverCA := flag.String("server-ca", "", "Server CA certificate for TLS")
+	clear := flag.Bool("clear", false, "Clear existing LAK and re-provision")
 	flag.Parse()
 
-	finalServerAddr := GetConfigString(*serverAddr, "GRPC_SERVER", "localhost:50051")
 	finalTPMDevice := GetConfigString(*tpmDevice, "TPM_DEVICE", "/dev/tpmrm0")
-	finalServerCA := GetConfigString(*serverCA, "SERVER_CA_PATH", "/openbao-data/grpc-ca.pem")
+
+	// Load server config from da.json
+	serverAddr, serverCAPEM, _, exists, err := LoadServerConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load server config: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("server not configured. Run da-init first")
+	}
 
 	log.Printf("da-lak: LAK Certificate Provisioning")
-	log.Printf("Server: %s", finalServerAddr)
+	log.Printf("Server: %s", serverAddr)
 	log.Printf("TPM: %s", finalTPMDevice)
-	log.Printf("Server CA: %s", finalServerCA)
 
 	if *clear {
-		if err := ClearBlobs(); err != nil {
-			return fmt.Errorf("failed to clear da.json: %w", err)
+		if err := ClearLAKBlobs(); err != nil {
+			return fmt.Errorf("failed to clear LAK blobs: %w", err)
 		}
-		log.Printf("da.json cleared")
+		log.Printf("LAK data cleared")
 	}
 
 	tpmClient, err := NewTPMClient(finalTPMDevice)
@@ -62,13 +68,13 @@ func run() error {
 		return nil
 	}
 
-	// Connect to server via TLS (server verification only, no client cert)
-	creds, err := NewTLSCredentials(finalServerCA)
+	// Connect to server via TLS using stored CA
+	creds, err := NewTLSCredentialsFromPEM(serverCAPEM)
 	if err != nil {
 		return fmt.Errorf("failed to create TLS credentials: %w", err)
 	}
 
-	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}

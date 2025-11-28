@@ -1,14 +1,17 @@
 // da-gen generates certificates using mTLS authentication with agent cert
-// This requires agent certificate to be provisioned first via da-agent.
+// Prerequisites: da-init, da-lak, and da-agent must be run first.
 //
-// Usage: da-gen --usage vpn [--server localhost:50051] [--tpm /dev/tpmrm0] [--output ./certs]
+// Usage: da-gen --usage vpn [--tpm /dev/tpmrm0] [--output ./certs]
 //
 // Output files:
 //   - <usage>-key.pem: Private key in standard PEM format (unencrypted)
 //   - <usage>-cert.pem: Certificate with full CA chain (leaf + intermediate + root)
 //
 // Note: Usage keys are ephemeral - generated on demand, not stored in device config.
-// The mTLS authentication still uses the TPM-bound agent certificate.
+// The mTLS authentication uses the TPM-bound agent certificate.
+//
+// Self-healing: If LAK or agent certificates are expired, they will be
+// automatically refreshed before generating the usage certificate.
 package main
 
 import (
@@ -37,26 +40,45 @@ func main() {
 
 func run() error {
 	usage := flag.String("usage", "", "Certificate usage (e.g., vpn, wifi, tls)")
-	serverAddr := flag.String("server", "", "gRPC server address")
 	tpmDevice := flag.String("tpm", "", "TPM device path")
 	outputDir := flag.String("output", "", "Output directory for certificate and key")
-	serverCA := flag.String("server-ca", "", "Server CA certificate for TLS")
 	flag.Parse()
 
 	if *usage == "" {
 		return fmt.Errorf("--usage is required (e.g., --usage vpn)")
 	}
 
-	finalServerAddr := GetConfigString(*serverAddr, "GRPC_SERVER", "localhost:50051")
 	finalTPMDevice := GetConfigString(*tpmDevice, "TPM_DEVICE", "/dev/tpmrm0")
 	finalOutputDir := GetConfigString(*outputDir, "DA_OUTPUT_DIR", ".")
-	finalServerCA := GetConfigString(*serverCA, "SERVER_CA_PATH", "/openbao-data/grpc-ca.pem")
+
+	// Load server config from da.json
+	serverAddr, serverCAPEM, _, exists, err := LoadServerConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load server config: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("server not configured. Run da-init first")
+	}
 
 	log.Printf("da-gen: Certificate Generation (mTLS)")
 	log.Printf("Usage: %s", *usage)
-	log.Printf("Server: %s", finalServerAddr)
+	log.Printf("Server: %s", serverAddr)
 	log.Printf("TPM: %s", finalTPMDevice)
 	log.Printf("Output: %s", finalOutputDir)
+
+	// Self-healing: check and refresh LAK/agent if needed
+	if !IsLAKValid() {
+		log.Printf("LAK certificate expired or invalid, refreshing...")
+		if err := RunTool("da-lak"); err != nil {
+			return fmt.Errorf("failed to refresh LAK: %w", err)
+		}
+	}
+	if !IsAgentValid() {
+		log.Printf("Agent certificate expired or invalid, refreshing...")
+		if err := RunTool("da-agent"); err != nil {
+			return fmt.Errorf("failed to refresh agent: %w", err)
+		}
+	}
 
 	// Initialize TPM client
 	tpmClient, err := NewTPMClient(finalTPMDevice)
@@ -64,14 +86,6 @@ func run() error {
 		return fmt.Errorf("failed to initialize TPM: %w", err)
 	}
 	defer tpmClient.Close()
-
-	// Check prerequisites
-	if tpmClient.NeedsLAKProvisioning() {
-		return fmt.Errorf("LAK not provisioned. Run da-lak first")
-	}
-	if tpmClient.NeedsAgentProvisioning() {
-		return fmt.Errorf("Agent not provisioned. Run da-agent first")
-	}
 
 	// Close AK to free TPM object slots - we don't need it for mTLS
 	tpmClient.CloseAK()
@@ -113,21 +127,15 @@ func run() error {
 		return fmt.Errorf("agent certificate not found")
 	}
 
-	// Connect to server via mTLS using agent cert
+	// Connect to server via mTLS using agent cert and stored CA
 	log.Printf("Connecting to server with mTLS...")
-	creds, agentKey, err := NewMTLSCredentialsWithTPM(&MTLSConfig{
-		ServerCAPath: finalServerCA,
-		AgentCertPEM: agentCertPEM,
-		AgentKeyPriv: agentKeyPriv,
-		AgentKeyPub:  agentKeyPub,
-		TPMClient:    tpmClient,
-	})
+	creds, agentKey, err := NewMTLSCredentialsWithTPMFromPEM(serverCAPEM, agentCertPEM, agentKeyPriv, agentKeyPub, tpmClient)
 	if err != nil {
 		return fmt.Errorf("failed to create mTLS credentials: %w", err)
 	}
 	defer tpmClient.CloseCertKey(agentKey)
 
-	conn, err := grpc.NewClient(finalServerAddr, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}

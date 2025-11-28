@@ -41,6 +41,19 @@ RUN mkdir -p /build/bin/da-fingerprint && \
     go mod tidy && \
     CGO_ENABLED=1 GOOS=linux go build -ldflags='-linkmode external -extldflags "-static"' -o /bin/da-fingerprint .
 
+# Build da-init (needs client library + proto for TLS)
+# Static build with musl for portability across Linux distributions
+RUN mkdir -p /build/bin/da-init/proto && \
+    cp client/*.go /build/bin/da-init/ && \
+    cp cmd/da-init/main.go /build/bin/da-init/init_main.go && \
+    cp -r /build/proto/* /build/bin/da-init/proto/ && \
+    cd /build/bin/da-init && \
+    cp /build/client/go.mod . && \
+    cp /build/client/go.sum . && \
+    sed -i 's|=> \.\./proto|=> ./proto|g' go.mod && \
+    go mod tidy && \
+    CGO_ENABLED=1 GOOS=linux go build -ldflags='-linkmode external -extldflags "-static"' -o /bin/da-init .
+
 # Build da-lak (needs client library + proto)
 # Static build with musl for portability across Linux distributions
 RUN mkdir -p /build/bin/da-lak/proto && \
@@ -91,6 +104,7 @@ RUN mkdir -p /certs /etc/da && chmod 755 /etc/da
 
 # Copy binaries
 COPY --from=builder /bin/da-fingerprint /bin/da-fingerprint
+COPY --from=builder /bin/da-init /bin/da-init
 COPY --from=builder /bin/da-lak /bin/da-lak
 COPY --from=builder /bin/da-agent /bin/da-agent
 COPY --from=builder /bin/da-gen /bin/da-gen

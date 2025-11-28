@@ -55,11 +55,10 @@ The combination ensures:
 |  +----------------------------------------------------------------+|
 |  |                          CLIENT                                ||
 |  |                                                                ||
-|  |  +--------------+ +----------+ +----------+ +---------------+  ||
-|  |  |da-fingerprint| | da-lak   | | da-agent | |    da-gen     |  ||
-|  |  | (EK hash)    | | (TCG     | | (ACME    | | (mTLS cert    |  ||
-|  |  |              | |  cred)   | |  attest) | |  generation)  |  ||
-|  |  +--------------+ +----------+ +----------+ +---------------+  ||
+|  |  +--------------+ +---------+ +--------+ +--------+ +--------+ ||
+|  |  |da-fingerprint| | da-init | | da-lak | |da-agent| | da-gen | ||
+|  |  | (EK hash)    | | (TOFU)  | | (TCG)  | | (ACME) | | (mTLS) | ||
+|  |  +--------------+ +---------+ +--------+ +--------+ +--------+ ||
 |  +----------------------------------------------------------------+|
 |                              TOOLS                                 |
 +====================================================================+
@@ -258,25 +257,40 @@ make build
 
 ### Run
 
+#### Administrator: Device Provisioning (before shipping)
+
 **1. Get Device Fingerprint**
 ```bash
 make da-fingerprint
 ```
 Output: `A3B2C1D4E5F6...` (Base64 SHA256 of EK public key)
 
-**2. Provision LAK Certificate (TCG Credential Activation)**
-```bash
-make da-lak
-```
-Performs MakeCredential/ActivateCredential, stores LAK cert in `/etc/da/da.json`
+Register this fingerprint on the server to allow the device to enroll.
 
-**3. Provision Agent Certificate (ACME device-attest-01)**
-```bash
-make da-agent
-```
-Creates TPM-attested agent identity, stores cert + key blobs in `/etc/da/da.json`
+#### End User: Device Initialization
 
-**4. Generate Usage Certificate (mTLS)**
+**2. Initialize Device (Bootstraps Trust)**
+```bash
+# Development/testing mode (skips SPKI verification):
+make da-init
+
+# Production mode with SPKI pin verification (TOFU):
+docker compose run --rm client /bin/da-init server:50051 sha256//...
+```
+This bootstraps device trust by:
+1. Connecting to the server (with SPKI pin verification in production mode)
+2. Persisting the server address and CA chain to `/etc/da/da.json`
+3. Provisioning LAK certificate (via da-lak)
+4. Provisioning agent certificate (via da-agent)
+
+The server displays its SPKI pin on startup in the logs:
+```
+═══════════════════════════════════════════════════════════
+Server SPKI Pin: sha256//yp/DAVVj1vR8tPqQ/KFq0kvXUKzJHMg6y58STUXM2vA=
+═══════════════════════════════════════════════════════════
+```
+
+**3. Generate Usage Certificate (mTLS)**
 ```bash
 make da-gen USAGE=vpn
 # Or with custom output directory:
@@ -285,6 +299,8 @@ make da-gen USAGE=vpn OUTPUT=/path/to/certs
 Output files (in `./certs/` by default):
 - `vpn-key.pem` - Private key in standard PEM format
 - `vpn-cert.pem` - Signed certificate with full CA chain
+
+Note: da-gen auto-refreshes expired LAK/agent certificates if needed (self-healing).
 
 ## Make Targets
 
@@ -297,10 +313,11 @@ Output files (in `./certs/` by default):
 | `make clean-pki` | Clean OpenBao PKI (requires clean-client) |
 | `make clean-swtpm` | Clean SWTPM state (new EK on restart) |
 | `make run-server` | Start infrastructure (OpenBao + Server + SWTPM) |
-| `make da-fingerprint` | Display permanent identifier |
+| `make da-fingerprint` | Display permanent identifier (admin provisioning) |
+| `make da-init` | Bootstrap device trust (--force mode for dev/testing) |
 | `make da-lak` | Provision LAK certificate (TCG credential activation) |
 | `make da-agent` | Provision agent certificate (ACME device-attest-01) |
-| `make da-gen USAGE=<name> [OUTPUT=<dir>]` | Generate usage certificate (mTLS) |
+| `make da-gen USAGE=<name> [OUTPUT=<dir>]` | Generate usage certificate (mTLS, self-healing) |
 
 ## Components
 
@@ -308,10 +325,11 @@ Output files (in `./certs/` by default):
 
 | Tool | Standard | Purpose |
 |------|----------|---------|
-| `da-fingerprint` | - | Compute and display permanent ID from EK |
+| `da-fingerprint` | - | Compute and display permanent ID from EK (admin provisioning) |
+| `da-init` | TOFU | Bootstrap device trust, chain to da-lak and da-agent |
 | `da-lak` | TCG Credential Profiles | Provision LAK via credential activation |
 | `da-agent` | draft-acme-device-attest-07 | Provision agent cert via TPM attestation |
-| `da-gen` | mTLS | Generate usage certificates with agent cert |
+| `da-gen` | mTLS | Generate usage certificates with agent cert (self-healing) |
 
 ### Server (gRPC)
 
