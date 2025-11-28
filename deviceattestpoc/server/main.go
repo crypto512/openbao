@@ -332,7 +332,7 @@ func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
 		}
 
 		ext := strings.ToLower(filepath.Ext(info.Name()))
-		if ext != ".crt" && ext != ".pem" && ext != ".der" {
+		if ext != ".crt" && ext != ".pem" && ext != ".der" && ext != ".cer" {
 			return nil
 		}
 
