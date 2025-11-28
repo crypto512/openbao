@@ -535,6 +535,12 @@ func ValidateDeviceAttest01Challenge(
 		return false, nil, fmt.Errorf("%w: failed to parse attestation object: %v", ErrBadAttestationStatement, err)
 	}
 
+	// Per draft-acme-device-attest-07 Section 5, authData SHOULD be omitted.
+	// Log a warning if authData is present (non-compliant but still accepted).
+	if attObj.HasAuthData() {
+		b.Logger().Warn("attestation object contains authData field which SHOULD be omitted per draft-acme-device-attest-07")
+	}
+
 	// Load attestation validation configuration from role
 	config, err := LoadAttestationValidationConfig(b, s, ctx, roleName)
 	if err != nil {

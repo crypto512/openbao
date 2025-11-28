@@ -36,6 +36,9 @@ type AttestationObject struct {
 	Format string `json:"fmt" cbor:"fmt"`
 	// AttStatement contains the attestation statement
 	AttStatement map[string]interface{} `json:"attStmt" cbor:"attStmt"`
+	// AuthData is the authenticator data - per draft-acme-device-attest-07 Section 5,
+	// this field is unused and SHOULD be omitted. We track it here to validate compliance.
+	AuthData []byte `json:"authData,omitempty" cbor:"authData,omitempty"`
 }
 
 // TPMAttestationStatement represents a TPM attestation statement
@@ -126,7 +129,18 @@ func ParseAttestationObject(attObjB64 string) (*AttestationObject, error) {
 		return nil, fmt.Errorf("failed to unmarshal CBOR attestation object: %w", err)
 	}
 
+	// Per draft-acme-device-attest-07 Section 5:
+	// "The authData field is unused and SHOULD be omitted from the attestation object."
+	// We accept attestation objects with authData for backwards compatibility,
+	// but this can be detected by the caller via HasAuthData().
 	return &attObj, nil
+}
+
+// HasAuthData returns true if the attestation object contains authData.
+// Per draft-acme-device-attest-07 Section 5, authData SHOULD be omitted.
+// Returns true if authData is present (non-compliant with SHOULD requirement).
+func (ao *AttestationObject) HasAuthData() bool {
+	return len(ao.AuthData) > 0
 }
 
 // ComputeKeyAuthorizationHash computes SHA-256 hash of the key authorization
