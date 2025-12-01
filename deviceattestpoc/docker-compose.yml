@@ -150,6 +150,31 @@ services:
     profiles:
       - hardware
 
+  # Rust Client - Device attestation tools (SWTPM)
+  client-rust:
+    build:
+      context: .
+      dockerfile: client-rust/Dockerfile
+    container_name: cert-client-rust
+    hostname: client-rust
+    depends_on:
+      tpm1:
+        condition: service_healthy
+      server:
+        condition: service_healthy
+    environment:
+      - LOG_LEVEL=debug
+      - TPM2TOOLS_TCTI=swtpm:host=tpm1,port=2321
+      - TPM_SWTPM_HOST=tpm1
+      - TPM_SWTPM_PORT=2321
+      - DA_JSON_PATH=/etc/da/da.json
+      - DA_OUTPUT_DIR=/certs
+    volumes:
+      - client-certs:/certs
+      - client-da-config:/etc/da
+    networks:
+      - attestation-net
+
 networks:
   attestation-net:
     driver: bridge

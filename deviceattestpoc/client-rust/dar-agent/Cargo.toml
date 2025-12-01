@@ -1,0 +1,19 @@
+[package]
+name = "dar-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dar-agent"
+path = "src/main.rs"
+
+[dependencies]
+da-common.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+rustls.workspace = true

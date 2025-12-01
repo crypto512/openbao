@@ -1,0 +1,25 @@
+[package]
+name = "dar-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dar-gen"
+path = "src/main.rs"
+
+[dependencies]
+da-common.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+rustls.workspace = true
+rsa.workspace = true
+rand.workspace = true
+x509-cert.workspace = true
+der.workspace = true
+pem.workspace = true
+sha2.workspace = true

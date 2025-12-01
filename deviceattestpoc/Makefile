@@ -1,13 +1,20 @@
 # Makefile for ACME Device Attestation PoC
 # Device attestation tools: da-init, da-fingerprint, da-lak, da-agent, da-gen
+# Rust client tools: dar-init, dar-fingerprint, dar-lak, dar-agent, dar-gen
 
-.PHONY: help build bin clean clean-client clean-pki clean-swtpm run-server da-init da-fingerprint da-lak da-agent da-gen
+.PHONY: help build build-client build-client-rust bin bin-rust clean clean-client clean-pki clean-swtpm run-server
+.PHONY: da-init da-fingerprint da-lak da-agent da-gen
+.PHONY: dar-init dar-fingerprint dar-lak dar-agent dar-gen
 
 help:
 	@echo "ACME Device Attestation PoC - Make targets:"
 	@echo ""
-	@echo "  make build                - Build all containers"
-	@echo "  make bin                  - Extract binaries to ./bin/"
+	@echo "Build targets:"
+	@echo "  make build                - Build all containers (Go + Rust clients)"
+	@echo "  make build-client         - Build Go client container only"
+	@echo "  make build-client-rust    - Build Rust client container only"
+	@echo "  make bin                  - Extract Go binaries to ./bin/"
+	@echo "  make bin-rust             - Extract Rust binaries to ./bin/"
 	@echo "  make clean                - Clean containers, volumes, and images"
 	@echo ""
 	@echo "Cleanup targets (with dependencies):"
@@ -17,7 +24,7 @@ help:
 	@echo ""
 	@echo "  make run-server           - Start server infrastructure (OpenBao + gRPC + SWTPM)"
 	@echo ""
-	@echo "Device Attestation Tools:"
+	@echo "Go Device Attestation Tools (da-*):"
 	@echo "  make da-init              - Bootstrap device trust (--force, no SPKI check)"
 	@echo "  make da-init SPKI=<pin>   - Bootstrap with SPKI pin verification (TOFU mode)"
 	@echo "  make da-fingerprint       - Display TPM EK fingerprint"
@@ -25,14 +32,23 @@ help:
 	@echo "  make da-agent             - Provision agent certificate (ACME device-attest-01)"
 	@echo "  make da-gen USAGE=<name> [OUTPUT=<dir>] - Generate usage certificate"
 	@echo ""
+	@echo "Rust Device Attestation Tools (dar-*):"
+	@echo "  make dar-init             - Bootstrap device trust (--force, no SPKI check)"
+	@echo "  make dar-init SPKI=<pin>  - Bootstrap with SPKI pin verification (TOFU mode)"
+	@echo "  make dar-fingerprint      - Display TPM EK fingerprint"
+	@echo "  make dar-lak              - Provision LAK certificate"
+	@echo "  make dar-agent            - Provision agent certificate (ACME device-attest-01)"
+	@echo "  make dar-gen USAGE=<name> [OUTPUT=<dir>] - Generate usage certificate"
+	@echo ""
 	@echo "Examples:"
-	@echo "  make da-init                            # Uses --force (dev/testing)"
-	@echo "  make da-init SPKI=sha256//abc123...     # Uses TOFU mode with SPKI verification"
-	@echo "  make da-fingerprint"
-	@echo "  make da-lak"
-	@echo "  make da-agent"
-	@echo "  make da-gen USAGE=vpn                   # Output to ./certs/"
-	@echo "  make da-gen USAGE=vpn OUTPUT=/tmp/out   # Output to /tmp/out/"
+	@echo "  make da-init                            # Go client, uses --force (dev/testing)"
+	@echo "  make dar-init                           # Rust client, uses --force (dev/testing)"
+	@echo "  make da-init SPKI=sha256//abc123...     # Go client with TOFU mode"
+	@echo "  make dar-init SPKI=sha256//abc123...    # Rust client with TOFU mode"
+	@echo "  make da-fingerprint                     # Go client"
+	@echo "  make dar-fingerprint                    # Rust client"
+	@echo "  make da-gen USAGE=vpn                   # Go client, output to ./certs/"
+	@echo "  make dar-gen USAGE=vpn                  # Rust client, output to ./certs/"
 	@echo ""
 
 # Build all containers
@@ -42,9 +58,23 @@ build:
 	@docker compose build
 	@echo "✓ Build complete"
 
-# Extract binaries from client container to ./bin/
-bin: build
-	@echo "Extracting binaries to ./bin/..."
+# Build Go client container only
+build-client:
+	@echo "Building Go client container..."
+	@docker buildx create --name deviceattestpoc-builder --use 2>/dev/null || docker buildx use deviceattestpoc-builder
+	@docker compose build client
+	@echo "✓ Go client build complete"
+
+# Build Rust client container only
+build-client-rust:
+	@echo "Building Rust client container..."
+	@docker buildx create --name deviceattestpoc-builder --use 2>/dev/null || docker buildx use deviceattestpoc-builder
+	@docker compose build client-rust
+	@echo "✓ Rust client build complete"
+
+# Extract Go binaries from client container to ./bin/
+bin: build-client
+	@echo "Extracting Go binaries to ./bin/..."
 	@mkdir -p bin
 	@docker create --name da-bin-extract deviceattestpoc-client true 2>/dev/null || \
 		(docker rm -f da-bin-extract 2>/dev/null && docker create --name da-bin-extract deviceattestpoc-client true)
@@ -54,8 +84,23 @@ bin: build
 	@docker cp da-bin-extract:/bin/da-agent bin/
 	@docker cp da-bin-extract:/bin/da-gen bin/
 	@docker rm -f da-bin-extract
-	@echo "✓ Binaries extracted:"
+	@echo "✓ Go binaries extracted:"
 	@ls -la bin/da-*
+
+# Extract Rust binaries from client-rust container to ./bin/
+bin-rust: build-client-rust
+	@echo "Extracting Rust binaries to ./bin/..."
+	@mkdir -p bin
+	@docker create --name dar-bin-extract deviceattestpoc-client-rust true 2>/dev/null || \
+		(docker rm -f dar-bin-extract 2>/dev/null && docker create --name dar-bin-extract deviceattestpoc-client-rust true)
+	@docker cp dar-bin-extract:/bin/dar-init bin/
+	@docker cp dar-bin-extract:/bin/dar-fingerprint bin/
+	@docker cp dar-bin-extract:/bin/dar-lak bin/
+	@docker cp dar-bin-extract:/bin/dar-agent bin/
+	@docker cp dar-bin-extract:/bin/dar-gen bin/
+	@docker rm -f dar-bin-extract
+	@echo "✓ Rust binaries extracted:"
+	@ls -la bin/dar-*
 
 # Clean containers, volumes, and images
 clean:
@@ -64,11 +109,12 @@ clean:
 	@docker buildx rm deviceattestpoc-builder 2>/dev/null || true
 	@echo "✓ Cleaned"
 
-# Clean client state (LAK, certs)
+# Clean client state (LAK, certs) - includes Go and Rust clients
 clean-client:
 	@echo "Cleaning client state..."
-	@docker compose rm -sf client 2>/dev/null || true
+	@docker compose rm -sf client client-rust 2>/dev/null || true
 	@docker ps -a --filter "name=deviceattestpoc-client-run" -q | xargs -r docker rm -f 2>/dev/null || true
+	@docker ps -a --filter "name=deviceattestpoc-client-rust-run" -q | xargs -r docker rm -f 2>/dev/null || true
 	@docker volume rm deviceattestpoc_client-da-config deviceattestpoc_client-hw-da-config deviceattestpoc_client-certs 2>/dev/null || true
 	@echo "✓ Client state cleaned (LAK, certs removed)"
 
@@ -159,4 +205,65 @@ endif
 	@docker compose run --rm -v $(abspath $(OUTPUT)):/output client /bin/da-gen --usage $(USAGE) --output /output
 	@echo ""
 	@echo "✓ Certificate generated:"
+	@ls -la $(OUTPUT)/$(USAGE)-cert.pem $(OUTPUT)/$(USAGE)-key.pem 2>/dev/null || echo "  (check $(OUTPUT) for output files)"
+
+# ============================================================================
+# Rust Client Tools (dar-*)
+# ============================================================================
+
+# Bootstrap device trust (Rust client)
+# Usage:
+#   make dar-init                     # Force mode (no SPKI verification, dev/testing)
+#   make dar-init SPKI=sha256//...    # TOFU mode with SPKI pin verification
+dar-init:
+ifdef SPKI
+	@echo "Bootstrapping device trust (Rust, TOFU mode with SPKI verification)..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client-rust /bin/dar-init server:50051 $(SPKI)
+else
+	@echo "Bootstrapping device trust (Rust, --force mode)..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client-rust /bin/dar-init --force server:50051
+endif
+	@echo "✓ Device initialized (Rust)"
+
+# Display TPM EK fingerprint (Rust client)
+dar-fingerprint:
+	@echo "Reading TPM EK fingerprint (Rust)..."
+	@docker compose up -d tpm1
+	@sleep 2
+	@docker compose run --rm client-rust /bin/dar-fingerprint
+	@echo ""
+
+# Provision LAK certificate (Rust client)
+dar-lak:
+	@echo "Provisioning LAK certificate (Rust)..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client-rust /bin/dar-lak
+	@echo "✓ LAK provisioned (Rust)"
+
+# Provision agent certificate via ACME device-attest-01 (Rust client)
+dar-agent:
+	@echo "Provisioning agent certificate (Rust)..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client-rust /bin/dar-agent
+	@echo "✓ Agent certificate provisioned (Rust)"
+
+# Generate usage certificate via mTLS (Rust client)
+# Usage: make dar-gen USAGE=vpn [OUTPUT=./certs]
+dar-gen:
+ifndef USAGE
+	$(error USAGE is required. Example: make dar-gen USAGE=vpn)
+endif
+	@echo "Generating certificate for usage=$(USAGE) (Rust)..."
+	@mkdir -p $(OUTPUT)
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm -v $(abspath $(OUTPUT)):/output client-rust /bin/dar-gen --usage $(USAGE) --output /output
+	@echo ""
+	@echo "✓ Certificate generated (Rust):"
 	@ls -la $(OUTPUT)/$(USAGE)-cert.pem $(OUTPUT)/$(USAGE)-key.pem 2>/dev/null || echo "  (check $(OUTPUT) for output files)"

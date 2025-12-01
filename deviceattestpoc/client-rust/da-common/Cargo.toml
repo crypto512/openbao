@@ -1,0 +1,33 @@
+[package]
+name = "da-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tss-esapi.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+ciborium.workspace = true
+sha2.workspace = true
+rsa.workspace = true
+rand.workspace = true
+x509-cert.workspace = true
+der.workspace = true
+pem.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+webpki-roots.workspace = true
+tokio-rustls.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true
