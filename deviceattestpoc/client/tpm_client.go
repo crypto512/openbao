@@ -62,7 +62,25 @@ type TPMClient struct {
 	tpmDevice           string
 }
 
+// NewTPMClient creates a TPM client with full AK initialization
 func NewTPMClient(tpmPath string) (*TPMClient, error) {
+	c, err := NewTPMClientForEnrollment(tpmPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize AK (create or load)
+	if err := c.InitializeAK(); err != nil {
+		c.Close()
+		return nil, err
+	}
+
+	return c, nil
+}
+
+// NewTPMClientForEnrollment creates a TPM client with only EK info (no AK)
+// Use this for enrollment check before creating AK
+func NewTPMClientForEnrollment(tpmPath string) (*TPMClient, error) {
 	log.Printf("Initializing TPM client")
 
 	if tpmPath == "" {
@@ -109,11 +127,26 @@ func NewTPMClient(tpmPath string) (*TPMClient, error) {
 	}
 	log.Printf("EK Hash (base64): %s", c.ekHashB64)
 
+	// Check if LAK already exists (for NeedsLAKProvisioning check)
+	_, _, lakCertPEM, lakCACertPEM, blobsExist, err := LoadBlobs()
+	if err != nil {
+		log.Printf("Warning: could not load blobs: %v", err)
+	} else if blobsExist && lakCertPEM != "" {
+		c.loadLAKCertificate(lakCertPEM)
+		c.loadLAKCACertificate(lakCACertPEM)
+	}
+
+	log.Printf("TPM client initialized (enrollment mode)")
+	return c, nil
+}
+
+// InitializeAK creates or loads the Attestation Key
+// Call this only after confirming the device is approved
+func (c *TPMClient) InitializeAK() error {
 	// Load saved blobs
 	akPriv, akPub, lakCertPEM, lakCACertPEM, blobsExist, err := LoadBlobs()
 	if err != nil {
-		c.Close()
-		return nil, fmt.Errorf("failed to load blobs: %w", err)
+		return fmt.Errorf("failed to load blobs: %w", err)
 	}
 
 	if blobsExist && len(akPriv) > 0 && len(akPub) > 0 && lakCertPEM != "" {
@@ -121,8 +154,7 @@ func NewTPMClient(tpmPath string) (*TPMClient, error) {
 		if err := c.loadAKFromBlobs(akPriv, akPub); err != nil {
 			log.Printf("Failed to load AK, creating new one: %v", err)
 			if err := c.createAK(); err != nil {
-				c.Close()
-				return nil, fmt.Errorf("failed to create AK: %w", err)
+				return fmt.Errorf("failed to create AK: %w", err)
 			}
 		} else {
 			c.akPrivBlob = akPriv
@@ -133,13 +165,12 @@ func NewTPMClient(tpmPath string) (*TPMClient, error) {
 	} else {
 		log.Printf("Creating new AK")
 		if err := c.createAK(); err != nil {
-			c.Close()
-			return nil, fmt.Errorf("failed to create AK: %w", err)
+			return fmt.Errorf("failed to create AK: %w", err)
 		}
 	}
 
-	log.Printf("TPM client initialized")
-	return c, nil
+	log.Printf("AK initialized")
+	return nil
 }
 
 func (c *TPMClient) loadEKCertificate() error {

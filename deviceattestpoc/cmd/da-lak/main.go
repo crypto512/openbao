@@ -54,7 +54,9 @@ func run() error {
 		log.Printf("LAK data cleared")
 	}
 
-	tpmClient, err := NewTPMClient(finalTPMDevice)
+	// Phase 1: Initialize TPM for enrollment only (no AK creation yet)
+	// This allows us to check approval status before heavy TPM operations
+	tpmClient, err := NewTPMClientForEnrollment(finalTPMDevice)
 	if err != nil {
 		return fmt.Errorf("failed to initialize TPM: %w", err)
 	}
@@ -85,8 +87,8 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Enroll TPM
-	log.Printf("Enrolling TPM device...")
+	// Phase 2: Check enrollment/approval status with server BEFORE creating AK
+	log.Printf("Checking device enrollment status...")
 	enrollResp, err := client.EnrollTPM(ctx, &pb.TPMEnrollmentRequest{
 		EkCertificatePem:  tpmClient.GetEKCertificatePEM(),
 		DeviceDescription: fmt.Sprintf("Device %s", permanentID[:8]),
@@ -97,11 +99,11 @@ func run() error {
 	if enrollResp.Status == "error" {
 		return fmt.Errorf("TPM enrollment failed: %s", enrollResp.Error)
 	}
-	log.Printf("TPM registered: %s", enrollResp.PermanentIdentifier)
+	log.Printf("Device status: %s", enrollResp.PermanentIdentifier)
 
-	// Check if device needs approval
+	// Check if device needs approval - exit BEFORE any AK operations
 	if enrollResp.PendingApproval {
-		tpmClient.Close() // Close TPM before exiting to avoid handle leak
+		tpmClient.Close()
 		conn.Close()
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "════════════════════════════════════════════════════════════")
@@ -121,7 +123,13 @@ func run() error {
 		os.Exit(2) // Exit code 2 indicates pending approval
 	}
 
-	// Get AK activation data
+	// Phase 3: Device is approved - now initialize AK (create or load)
+	log.Printf("Device approved, initializing attestation key...")
+	if err := tpmClient.InitializeAK(); err != nil {
+		return fmt.Errorf("failed to initialize AK: %w", err)
+	}
+
+	// Phase 4: Get AK activation data for credential challenge
 	log.Printf("Requesting credential challenge...")
 	akParams, ekPublic, err := tpmClient.GetAKActivationData()
 	if err != nil {

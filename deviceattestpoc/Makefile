@@ -19,6 +19,7 @@ help:
 	@echo ""
 	@echo "Device Attestation Tools:"
 	@echo "  make da-init              - Bootstrap device trust (--force, no SPKI check)"
+	@echo "  make da-init SPKI=<pin>   - Bootstrap with SPKI pin verification (TOFU mode)"
 	@echo "  make da-fingerprint       - Display TPM EK fingerprint"
 	@echo "  make da-lak               - Provision LAK certificate"
 	@echo "  make da-agent             - Provision agent certificate (ACME device-attest-01)"
@@ -26,6 +27,7 @@ help:
 	@echo ""
 	@echo "Examples:"
 	@echo "  make da-init                            # Uses --force (dev/testing)"
+	@echo "  make da-init SPKI=sha256//abc123...     # Uses TOFU mode with SPKI verification"
 	@echo "  make da-fingerprint"
 	@echo "  make da-lak"
 	@echo "  make da-agent"
@@ -82,7 +84,7 @@ clean-pki: clean-client
 # Clean SWTPM state (requires clean-client first because EK changes)
 clean-swtpm: clean-client
 	@echo "Cleaning SWTPM state..."
-	@docker compose stop tpm1 2>/dev/null || true
+	@docker compose rm -sf tpm1 2>/dev/null || true
 	@docker volume rm deviceattestpoc_swtpm-state 2>/dev/null || true
 	@echo "✓ SWTPM state cleaned (EK certificates will be regenerated)"
 	@echo "  Note: Client state also cleaned (EK hash changes)"
@@ -98,14 +100,24 @@ run-server:
 	@echo ""
 	@docker compose up openbao init server tpm1
 
-# Bootstrap device trust (uses --force by default for dev/testing)
-# For production with SPKI verification, run manually:
-#   docker compose run --rm client /bin/da-init <server> <spki-pin>
+# Bootstrap device trust
+# Usage:
+#   make da-init                     # Force mode (no SPKI verification, dev/testing)
+#   make da-init SPKI=sha256//...    # TOFU mode with SPKI pin verification
+SPKI ?=
+
 da-init:
+ifdef SPKI
+	@echo "Bootstrapping device trust (TOFU mode with SPKI verification)..."
+	@docker compose up -d openbao init server tpm1
+	@sleep 3
+	@docker compose run --rm client /bin/da-init server:50051 $(SPKI)
+else
 	@echo "Bootstrapping device trust (--force mode)..."
 	@docker compose up -d openbao init server tpm1
 	@sleep 3
 	@docker compose run --rm client /bin/da-init --force server:50051
+endif
 	@echo "✓ Device initialized"
 
 # Display TPM EK fingerprint

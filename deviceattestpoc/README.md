@@ -275,13 +275,8 @@ Register this fingerprint on the server to allow the device to enroll.
 make da-init
 
 # Production mode with SPKI pin verification (TOFU):
-docker compose run --rm client /bin/da-init server:50051 sha256//...
+make da-init SPKI=sha256//yp/DAVVj1vR8tPqQ/KFq0kvXUKzJHMg6y58STUXM2vA=
 ```
-This bootstraps device trust by:
-1. Connecting to the server (with SPKI pin verification in production mode)
-2. Persisting the server address and CA chain to `/etc/da/da.json`
-3. Provisioning LAK certificate (via da-lak)
-4. Provisioning agent certificate (via da-agent)
 
 The server displays its SPKI pin on startup in the logs:
 ```
@@ -289,6 +284,85 @@ The server displays its SPKI pin on startup in the logs:
 Server SPKI Pin: sha256//yp/DAVVj1vR8tPqQ/KFq0kvXUKzJHMg6y58STUXM2vA=
 ═══════════════════════════════════════════════════════════
 ```
+
+#### da-init Sequence
+
+The `da-init` command performs Trust-On-First-Use (TOFU) bootstrap:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          da-init Sequence                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  1. TOFU Setup                                                          │
+│     ├─ Connect to server (with SPKI pin verification if provided)       │
+│     ├─ Capture server CA chain during TLS handshake                     │
+│     └─ Persist to /etc/da/da.json: server address, CA, SPKI pin         │
+│                                                                         │
+│  2. TPM Enrollment (via da-lak)                                         │
+│     ├─ Send EK certificate to server                                    │
+│     ├─ Server validates EK against manufacturer CAs                     │
+│     └─ Check device approval status (see below)                         │
+│         │                                                               │
+│         ├─ [Pre-registered by admin] → Auto-approve, continue           │
+│         ├─ [Auto-approve enabled]    → Auto-approve, continue           │
+│         └─ [Auto-approve disabled]   → Exit with "PENDING APPROVAL"     │
+│                                                                         │
+│  3. LAK Provisioning (if approved)                                      │
+│     ├─ Generate AK in TPM                                               │
+│     ├─ MakeCredential/ActivateCredential challenge                      │
+│     └─ Receive LAK certificate                                          │
+│                                                                         │
+│  4. Agent Certificate (via da-agent)                                    │
+│     ├─ Create agent key in TPM                                          │
+│     ├─ ACME device-attest-01 challenge                                  │
+│     └─ Receive agent certificate                                        │
+│                                                                         │
+│  ✓ Device fully initialized                                             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Device Approval Workflow
+
+The server supports two enrollment modes controlled via the web UI:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| **Auto-approve enabled** (default) | New devices are automatically approved | Development, testing |
+| **Auto-approve disabled** | New devices require admin approval | Production |
+
+**Pre-registered devices** (added via web UI) go directly to "provisioned" state, bypassing approval. When the device connects, it can immediately proceed with LAK provisioning.
+
+When auto-approve is disabled and a new device connects:
+
+```
+════════════════════════════════════════════════════════════
+  DEVICE PENDING APPROVAL
+════════════════════════════════════════════════════════════
+
+  This device has been registered but requires admin approval
+  before it can proceed with provisioning.
+
+  Permanent ID: A3B2C1D4E5F6...
+
+  Next steps:
+  1. Ask your administrator to approve this device
+  2. Run 'da-init' again after approval
+
+════════════════════════════════════════════════════════════
+```
+
+The admin can then approve the device via the web UI, and the user re-runs `make da-init`.
+
+**Exit Codes:**
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Error (check logs) |
+| 2 | Pending approval (not an error, device registered but awaiting admin) |
+
+> **Note:** When pending approval, no TPM attestation key is created. This prevents TPM dictionary attack lockout from repeated attempts while waiting for admin approval.
 
 **3. Generate Usage Certificate (mTLS)**
 ```bash
@@ -311,10 +385,11 @@ Note: da-gen auto-refreshes expired LAK/agent certificates if needed (self-heali
 | `make clean` | Remove containers, volumes, and images |
 | `make clean-client` | Clean client state (LAK, agent, certificates) |
 | `make clean-pki` | Clean OpenBao PKI (requires clean-client) |
-| `make clean-swtpm` | Clean SWTPM state (new EK on restart) |
+| `make clean-swtpm` | Clean SWTPM state and container (new EK, clears DA lockout) |
 | `make run-server` | Start infrastructure (OpenBao + Server + SWTPM) |
 | `make da-fingerprint` | Display permanent identifier (admin provisioning) |
 | `make da-init` | Bootstrap device trust (--force mode for dev/testing) |
+| `make da-init SPKI=<pin>` | Bootstrap with SPKI pin verification (TOFU mode) |
 | `make da-lak` | Provision LAK certificate (TCG credential activation) |
 | `make da-agent` | Provision agent certificate (ACME device-attest-01) |
 | `make da-gen USAGE=<name> [OUTPUT=<dir>]` | Generate usage certificate (mTLS, self-healing) |
@@ -354,8 +429,8 @@ The server provides an HTMX-based web interface for device management:
 | **Real-time Updates** | SSE-based live updates when device state changes |
 
 Device status progression:
-- `registered` → Admin pre-registered device fingerprint (awaiting device connection)
-- `provisioned` → Device connected via da-init (ready for LAK enrollment)
+- `registered` → Device self-enrolled, awaiting admin approval
+- `provisioned` → Device approved (ready for LAK enrollment)
 - `enrolled` → LAK certificate issued (device identity established)
 - `trusted` → Agent certificate issued (fully trusted, can request usage certificates)
 

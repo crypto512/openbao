@@ -111,18 +111,19 @@ func (ws *WebServer) handleAddDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Manual device addition via web UI starts as registered
-	// Device must connect via da-init to become provisioned
-	status := db.StatusRegistered
+	// Manual device addition via web UI goes directly to provisioned state
+	// Admin approval is implicit when adding via web UI
+	// PreRegistered=true means admin added this device
+	status := db.StatusProvisioned
 
-	device, err := ws.db.CreateDevice(fingerprint, fingerprint[:min(16, len(fingerprint))], description, status)
+	device, err := ws.db.CreateDevice(fingerprint, fingerprint[:min(16, len(fingerprint))], description, status, true)
 	if err != nil {
 		log.Printf("Failed to create device: %v", err)
 		http.Error(w, "Failed to add device", http.StatusInternalServerError)
 		return
 	}
 
-	ws.db.CreateAuditEntry(db.EventDeviceAdded, &device.ID, fingerprint, "Device registered via web UI", r.RemoteAddr, true)
+	ws.db.CreateAuditEntry(db.EventDeviceAdded, &device.ID, fingerprint, "Device added and provisioned via web UI", r.RemoteAddr, true)
 	ws.sseHub.BroadcastAll()
 
 	ws.handleListDevices(w, r)

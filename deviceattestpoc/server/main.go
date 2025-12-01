@@ -204,19 +204,37 @@ func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*
 
 	existingDevice, _ := s.db.GetDeviceByEKHash(ekHash)
 	if existingDevice != nil {
-		// Device already exists - update status to provisioned if it was only registered
+		// Device already exists
 		if existingDevice.Status == db.StatusRegistered {
-			s.db.UpdateDeviceStatusByEKHash(ekHash, db.StatusProvisioned)
-			s.db.CreateAuditEntry(db.EventDeviceEnrolled, &existingDevice.ID, ekHash, "Device provisioned via da-init", getClientIP(ctx), true)
-			s.sseHub.BroadcastAll()
-			log.Printf("Device provisioned: %s (was registered)", ekHash)
-		} else {
+			// Device is pending approval
+			if existingDevice.PreRegistered {
+				// Admin pre-registered this device - auto-approve
+				s.db.UpdateDeviceStatusByEKHash(ekHash, db.StatusProvisioned)
+				s.db.CreateAuditEntry(db.EventDeviceEnrolled, &existingDevice.ID, ekHash, "Device provisioned via da-init (pre-registered)", getClientIP(ctx), true)
+				s.sseHub.BroadcastAll()
+				log.Printf("Device provisioned: %s (pre-registered by admin)", ekHash)
+				return &pb.EnrollmentResponse{
+					Status:              "success",
+					PermanentIdentifier: ekHash,
+					PendingApproval:     false,
+				}, nil
+			}
+			// Self-enrolled device, still pending approval
 			s.db.UpdateLastSeen(ekHash)
-			log.Printf("Device already provisioned: %s", ekHash)
+			log.Printf("Device pending approval: %s", ekHash)
+			return &pb.EnrollmentResponse{
+				Status:              "success",
+				PermanentIdentifier: ekHash,
+				PendingApproval:     true,
+			}, nil
 		}
+		// Device already provisioned or beyond
+		s.db.UpdateLastSeen(ekHash)
+		log.Printf("Device already provisioned: %s", ekHash)
 		return &pb.EnrollmentResponse{
 			Status:              "success",
 			PermanentIdentifier: ekHash,
+			PendingApproval:     false,
 		}, nil
 	}
 
@@ -231,7 +249,7 @@ func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*
 		fingerprint = fingerprint[:16]
 	}
 
-	device, err := s.db.CreateDevice(ekHash, fingerprint, req.DeviceDescription, status)
+	device, err := s.db.CreateDevice(ekHash, fingerprint, req.DeviceDescription, status, false)
 	if err != nil {
 		log.Printf("Failed to create device: %v", err)
 		return &pb.EnrollmentResponse{Status: "error", Error: "failed to provision device"}, nil

@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS devices (
     description TEXT,
     status TEXT NOT NULL DEFAULT 'pending_approval',
     -- Status values: pending_approval, enrolled, lak_issued, agent_cert_issued
+    pre_registered INTEGER NOT NULL DEFAULT 0,
+    -- pre_registered: 1 if admin added device via web UI, 0 if device self-enrolled
     lak_not_before TEXT,
     lak_not_after TEXT,
     agent_cert_not_before TEXT,

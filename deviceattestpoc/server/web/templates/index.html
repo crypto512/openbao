@@ -31,10 +31,7 @@
     <div class="card">
         <label class="toggle">
             <input type="checkbox" id="auto-approve"
-                   hx-put="/api/settings/auto-approve"
-                   hx-trigger="change"
-                   hx-headers='{"Content-Type": "application/json"}'
-                   hx-vals='js:{value: document.getElementById("auto-approve").checked}'
+                   onchange="toggleAutoApprove(this.checked)"
                    {{if .AutoApprove}}checked{{end}}>
             <span>Auto-approve new devices</span>
         </label>
@@ -42,6 +39,23 @@
             When enabled, devices are automatically provisioned without manual approval.
         </p>
     </div>
+    <script>
+    function toggleAutoApprove(enabled) {
+        fetch('/api/settings/auto-approve', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({value: enabled})
+        }).then(resp => {
+            if (!resp.ok) {
+                console.error('Failed to update auto-approve setting');
+                document.getElementById('auto-approve').checked = !enabled;
+            }
+        }).catch(err => {
+            console.error('Error updating auto-approve:', err);
+            document.getElementById('auto-approve').checked = !enabled;
+        });
+    }
+    </script>
 
     <!-- Device List -->
     <div class="card">

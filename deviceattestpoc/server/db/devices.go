@@ -23,6 +23,7 @@ type Device struct {
 	Fingerprint         string
 	Description         string
 	Status              DeviceStatus
+	PreRegistered       bool // true if admin added via web UI, false if self-enrolled
 	LAKNotBefore        *time.Time
 	LAKNotAfter         *time.Time
 	AgentCertNotBefore  *time.Time
@@ -48,7 +49,7 @@ type DeviceCounts struct {
 }
 
 // CreateDevice creates a new device record
-func (db *DB) CreateDevice(ekHash, fingerprint, description string, status DeviceStatus) (*Device, error) {
+func (db *DB) CreateDevice(ekHash, fingerprint, description string, status DeviceStatus, preRegistered bool) (*Device, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -58,10 +59,15 @@ func (db *DB) CreateDevice(ekHash, fingerprint, description string, status Devic
 		enrolledAt = &now
 	}
 
+	preRegInt := 0
+	if preRegistered {
+		preRegInt = 1
+	}
+
 	result, err := db.Exec(`
-		INSERT INTO devices (ek_hash, fingerprint, description, status, enrolled_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, ekHash, fingerprint, description, string(status), enrolledAt, now, now)
+		INSERT INTO devices (ek_hash, fingerprint, description, status, pre_registered, enrolled_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, ekHash, fingerprint, description, string(status), preRegInt, enrolledAt, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create device: %w", err)
 	}
@@ -84,7 +90,7 @@ func (db *DB) GetDeviceByEKHash(ekHash string) (*Device, error) {
 
 func (db *DB) getDeviceByEKHashUnlocked(ekHash string) (*Device, error) {
 	row := db.QueryRow(`
-		SELECT id, ek_hash, fingerprint, description, status,
+		SELECT id, ek_hash, fingerprint, description, status, pre_registered,
 			   lak_not_before, lak_not_after, agent_cert_not_before, agent_cert_not_after,
 			   created_at, updated_at, enrolled_at, last_seen_at
 		FROM devices WHERE ek_hash = ?
@@ -103,7 +109,7 @@ func (db *DB) GetDeviceByID(id int64) (*Device, error) {
 
 func (db *DB) getDeviceByID(id int64) (*Device, error) {
 	row := db.QueryRow(`
-		SELECT id, ek_hash, fingerprint, description, status,
+		SELECT id, ek_hash, fingerprint, description, status, pre_registered,
 			   lak_not_before, lak_not_after, agent_cert_not_before, agent_cert_not_after,
 			   created_at, updated_at, enrolled_at, last_seen_at
 		FROM devices WHERE id = ?
@@ -118,7 +124,7 @@ func (db *DB) GetDeviceByFingerprint(fingerprint string) (*Device, error) {
 	defer db.mu.RUnlock()
 
 	row := db.QueryRow(`
-		SELECT id, ek_hash, fingerprint, description, status,
+		SELECT id, ek_hash, fingerprint, description, status, pre_registered,
 			   lak_not_before, lak_not_after, agent_cert_not_before, agent_cert_not_after,
 			   created_at, updated_at, enrolled_at, last_seen_at
 		FROM devices WHERE fingerprint = ? OR ek_hash LIKE ?
@@ -152,7 +158,7 @@ func (db *DB) ListDevices() ([]*Device, error) {
 	defer db.mu.RUnlock()
 
 	rows, err := db.Query(`
-		SELECT id, ek_hash, fingerprint, description, status,
+		SELECT id, ek_hash, fingerprint, description, status, pre_registered,
 			   lak_not_before, lak_not_after, agent_cert_not_before, agent_cert_not_after,
 			   created_at, updated_at, enrolled_at, last_seen_at
 		FROM devices
@@ -329,9 +335,10 @@ func scanDevice(row *sql.Row) (*Device, error) {
 	var createdAt, updatedAt string
 	var enrolledAt, lastSeenAt sql.NullString
 	var status string
+	var preRegistered int
 
 	err := row.Scan(
-		&device.ID, &device.EKHash, &device.Fingerprint, &device.Description, &status,
+		&device.ID, &device.EKHash, &device.Fingerprint, &device.Description, &status, &preRegistered,
 		&lakNotBefore, &lakNotAfter, &agentNotBefore, &agentNotAfter,
 		&createdAt, &updatedAt, &enrolledAt, &lastSeenAt,
 	)
@@ -343,6 +350,7 @@ func scanDevice(row *sql.Row) (*Device, error) {
 	}
 
 	device.Status = DeviceStatus(status)
+	device.PreRegistered = preRegistered != 0
 	device.LAKNotBefore = parseNullTime(lakNotBefore)
 	device.LAKNotAfter = parseNullTime(lakNotAfter)
 	device.AgentCertNotBefore = parseNullTime(agentNotBefore)
@@ -361,9 +369,10 @@ func scanDeviceRow(rows *sql.Rows) (*Device, error) {
 	var createdAt, updatedAt string
 	var enrolledAt, lastSeenAt sql.NullString
 	var status string
+	var preRegistered int
 
 	err := rows.Scan(
-		&device.ID, &device.EKHash, &device.Fingerprint, &device.Description, &status,
+		&device.ID, &device.EKHash, &device.Fingerprint, &device.Description, &status, &preRegistered,
 		&lakNotBefore, &lakNotAfter, &agentNotBefore, &agentNotAfter,
 		&createdAt, &updatedAt, &enrolledAt, &lastSeenAt,
 	)
@@ -372,6 +381,7 @@ func scanDeviceRow(rows *sql.Rows) (*Device, error) {
 	}
 
 	device.Status = DeviceStatus(status)
+	device.PreRegistered = preRegistered != 0
 	device.LAKNotBefore = parseNullTime(lakNotBefore)
 	device.LAKNotAfter = parseNullTime(lakNotAfter)
 	device.AgentCertNotBefore = parseNullTime(agentNotBefore)
