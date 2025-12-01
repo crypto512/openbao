@@ -269,10 +269,42 @@ func (s *Server) EnrollTPM(ctx context.Context, req *pb.TPMEnrollmentRequest) (*
 
 func (s *Server) ProvisionLAK(ctx context.Context, req *pb.ProvisionLAKRequest) (*pb.ProvisionLAKResponse, error) {
 	log.Printf("ProvisionLAK: permanentID=%s", req.PermanentIdentifier)
+	// Note: Device status validation is handled by the security interceptor
 
-	allowed, err := s.db.IsDeviceAllowed(req.PermanentIdentifier)
-	if err != nil || !allowed {
-		return &pb.ProvisionLAKResponse{Status: "error", Error: "device not registered or provisioned"}, nil
+	// Security: Validate EK certificate against trusted manufacturer CAs
+	if req.EkCertPem == "" {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "EK certificate required"}, nil
+	}
+
+	block, _ := pem.Decode([]byte(req.EkCertPem))
+	if block == nil {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "invalid EK certificate PEM"}, nil
+	}
+
+	ekCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: fmt.Sprintf("failed to parse EK certificate: %v", err)}, nil
+	}
+
+	// Validate EK certificate chain against trusted TPM manufacturer CAs
+	if _, caName, err := s.validateEKCertificate(ekCert); err != nil {
+		log.Printf("ProvisionLAK: EK certificate validation failed: %v", err)
+		s.db.CreateAuditEntry(db.EventLAKFailed, nil, req.PermanentIdentifier, fmt.Sprintf("EK certificate not trusted: %v", err), getClientIP(ctx), false)
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "EK certificate not from trusted TPM manufacturer"}, nil
+	} else {
+		log.Printf("ProvisionLAK: EK certificate validated (CA: %s)", caName)
+	}
+
+	// Security: Verify EK certificate matches the claimed permanent ID
+	ekHash, err := ComputeEKHashBase64(ekCert)
+	if err != nil {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: fmt.Sprintf("failed to compute EK hash: %v", err)}, nil
+	}
+
+	if ekHash != req.PermanentIdentifier {
+		log.Printf("ProvisionLAK: EK hash mismatch - claimed: %s, actual: %s", req.PermanentIdentifier, ekHash)
+		s.db.CreateAuditEntry(db.EventLAKFailed, nil, req.PermanentIdentifier, "EK certificate does not match claimed identity", getClientIP(ctx), false)
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "EK certificate does not match claimed device identity"}, nil
 	}
 
 	var akParams attest.AttestationParameters
@@ -283,6 +315,21 @@ func (s *Server) ProvisionLAK(ctx context.Context, req *pb.ProvisionLAKRequest) 
 	ekPubKey, err := x509.ParsePKIXPublicKey(req.EkPublic)
 	if err != nil {
 		return &pb.ProvisionLAKResponse{Status: "error", Error: err.Error()}, nil
+	}
+
+	// Security: Verify EK public key matches the certificate
+	ekCertPubKeyDER, err := x509.MarshalPKIXPublicKey(ekCert.PublicKey)
+	if err != nil {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "failed to marshal EK cert public key"}, nil
+	}
+	ekReqPubKeyDER, err := x509.MarshalPKIXPublicKey(ekPubKey)
+	if err != nil {
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "failed to marshal EK request public key"}, nil
+	}
+	if string(ekCertPubKeyDER) != string(ekReqPubKeyDER) {
+		log.Printf("ProvisionLAK: EK public key mismatch between certificate and request")
+		s.db.CreateAuditEntry(db.EventLAKFailed, nil, req.PermanentIdentifier, "EK public key mismatch", getClientIP(ctx), false)
+		return &pb.ProvisionLAKResponse{Status: "error", Error: "EK public key does not match certificate"}, nil
 	}
 
 	activationParams := attest.ActivationParameters{
@@ -504,6 +551,16 @@ func loadTrustedEKCAs(caBasePath string) (map[string]*x509.Certificate, error) {
 }
 
 func (s *Server) validateEKCertificate(ekCert *x509.Certificate) (*x509.Certificate, string, error) {
+	// Check EK certificate validity period
+	now := time.Now()
+	if now.Before(ekCert.NotBefore) {
+		return nil, "", fmt.Errorf("EK certificate not yet valid (notBefore: %s)", ekCert.NotBefore.Format(time.RFC3339))
+	}
+	if now.After(ekCert.NotAfter) {
+		return nil, "", fmt.Errorf("EK certificate has expired (notAfter: %s)", ekCert.NotAfter.Format(time.RFC3339))
+	}
+
+	// Try to find a matching issuer CA
 	for _, cert := range s.trustedEKCAs {
 		if cert.Subject.String() == ekCert.Issuer.String() {
 			if err := ekCert.CheckSignatureFrom(cert); err == nil {
@@ -517,6 +574,7 @@ func (s *Server) validateEKCertificate(ekCert *x509.Certificate) (*x509.Certific
 		}
 	}
 
+	// Try self-signed root CAs
 	for caName, cert := range s.trustedEKCAs {
 		if cert.Subject.String() == cert.Issuer.String() {
 			if err := ekCert.CheckSignatureFrom(cert); err == nil {
