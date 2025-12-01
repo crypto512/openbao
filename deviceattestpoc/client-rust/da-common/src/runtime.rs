@@ -18,7 +18,12 @@ pub fn init() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
-                .add_directive("da_common=info".parse().expect("valid directive")),
+                .add_directive("da_common=info".parse().expect("valid directive"))
+                .add_directive("dar_init=info".parse().expect("valid directive"))
+                .add_directive("dar_fingerprint=info".parse().expect("valid directive"))
+                .add_directive("dar_lak=info".parse().expect("valid directive"))
+                .add_directive("dar_agent=info".parse().expect("valid directive"))
+                .add_directive("dar_gen=info".parse().expect("valid directive")),
         )
         .init();
 }

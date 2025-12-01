@@ -17,7 +17,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use da_common::{
-    get_agent_ca_cert_pem, get_agent_cert_pem, get_agent_key_blobs,
+    create_tpm_mtls_channel, get_agent_ca_cert_pem, get_agent_cert_pem, get_agent_key_blobs,
     get_output_dir, is_agent_valid, is_lak_valid, load_server_config,
     process::run_tool,
     proto::certificate_service_client::CertificateServiceClient,
@@ -31,7 +31,8 @@ use sha2::Sha256;
 use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
-use tracing::{error, info, warn};
+use std::sync::{Arc, Mutex};
+use tracing::{error, info};
 use x509_cert::builder::{Builder, RequestBuilder};
 use x509_cert::der::EncodePem;
 use x509_cert::name::Name;
@@ -94,17 +95,22 @@ async fn run() -> Result<()> {
         run_tool("dar-agent")?;
     }
 
-    // Initialize TPM client
-    let mut tpm_client =
-        TpmClient::new(args.tpm.as_deref()).context("Failed to initialize TPM")?;
+    // Initialize TPM client wrapped in Arc<Mutex> for thread-safe access
+    let tpm_client = TpmClient::new(args.tpm.as_deref()).context("Failed to initialize TPM")?;
+    let tpm_client = Arc::new(Mutex::new(tpm_client));
 
     // Close AK to free TPM object slots - we don't need it for mTLS
-    tpm_client.close_ak();
+    {
+        let mut tpm = tpm_client.lock().unwrap();
+        tpm.close_ak();
+    }
 
-    let permanent_id = tpm_client
-        .get_permanent_id()
-        .context("Failed to get permanent ID")?
-        .to_string();
+    let permanent_id = {
+        let tpm = tpm_client.lock().unwrap();
+        tpm.get_permanent_id()
+            .context("Failed to get permanent ID")?
+            .to_string()
+    };
     info!("Permanent ID: {}", permanent_id);
 
     // Generate standard RSA key (not TPM-bound)
@@ -137,43 +143,32 @@ async fn run() -> Result<()> {
         get_agent_key_blobs().context("Agent key blobs not found")?;
 
     // Load agent key into TPM for mTLS signing
-    tpm_client
-        .load_agent_key(&agent_key_priv, &agent_key_pub)
-        .context("Failed to load agent key")?;
-
-    // For mTLS, we need to create a signing key that uses TPM
-    // This is a complex operation that requires implementing rustls's SigningKey trait
-    // For now, we'll note this as a limitation and provide a workaround message
+    {
+        let mut tpm = tpm_client.lock().unwrap();
+        tpm.load_agent_key(&agent_key_priv, &agent_key_pub)
+            .context("Failed to load agent key")?;
+    }
 
     // Get agent CA certificate for the full chain
     let agent_ca_pem = get_agent_ca_cert_pem();
 
-    // Create full client cert chain (agent cert + CA) - prepared for future mTLS
-    let _full_client_cert = if let Some(ca_pem) = agent_ca_pem {
+    // Create full client cert chain (agent cert + CA)
+    let full_client_cert = if let Some(ca_pem) = agent_ca_pem {
         format!("{}\n{}", agent_cert_pem, ca_pem)
     } else {
         agent_cert_pem.clone()
     };
 
-    // NOTE: TPM-backed mTLS requires implementing rustls's SigningKey trait
-    // For now, this implementation requires the server to accept TLS-only connections
-    // or a software key export (which defeats TPM protection).
-    //
-    // A complete implementation would:
-    // 1. Implement rustls::sign::SigningKey using TpmClient::sign_with_agent_key
-    // 2. Create a custom ResolvesClientCert
-    // 3. Use the custom config with tonic
-    //
-    // For this PoC, we'll attempt connection with TLS only and let the server
-    // handle the certificate verification differently, or fail with a clear message.
-
-    warn!("TPM-backed mTLS signing not fully implemented - attempting TLS connection");
-    warn!("Server must be configured to accept TLS-only for IssueCertificate");
-
-    // Try to connect with TLS only (not mTLS) - this may fail if server requires mTLS
-    let channel = da_common::create_tls_channel(&server_addr, &server_ca_pem)
-        .await
-        .context("Failed to connect to server")?;
+    // Connect with TPM-backed mTLS
+    info!("Connecting with TPM-backed mTLS...");
+    let channel = create_tpm_mtls_channel(
+        &server_addr,
+        &server_ca_pem,
+        &full_client_cert,
+        tpm_client.clone(),
+    )
+    .await
+    .context("Failed to connect to server with mTLS")?;
 
     let mut client = CertificateServiceClient::new(channel);
 

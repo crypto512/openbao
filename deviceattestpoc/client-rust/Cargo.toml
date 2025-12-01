@@ -40,6 +40,10 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 tokio-rustls = "0.26"
+hyper-rustls = { version = "0.27", features = ["http2", "ring"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http2", "tokio"] }
+tower = "0.5"
+http = "1"
 
 # Error handling
 thiserror = "2"

@@ -53,6 +53,34 @@ const (
 	defaultBlobPath    = "/etc/da/da.json"
 )
 
+// addTPM2BPrefix adds a 2-byte big-endian size prefix to a TPM blob
+// This converts Go's raw TPMT_* format to TSS2's TPM2B_* format
+func addTPM2BPrefix(blob []byte) []byte {
+	if len(blob) == 0 {
+		return blob
+	}
+	result := make([]byte, len(blob)+2)
+	result[0] = byte(len(blob) >> 8)
+	result[1] = byte(len(blob))
+	copy(result[2:], blob)
+	return result
+}
+
+// stripTPM2BPrefix removes a 2-byte big-endian size prefix from a TPM blob
+// This converts TSS2's TPM2B_* format to Go's raw TPMT_* format
+func stripTPM2BPrefix(blob []byte) []byte {
+	if len(blob) < 2 {
+		return blob
+	}
+	// Verify the size prefix matches
+	size := int(blob[0])<<8 | int(blob[1])
+	if size == len(blob)-2 {
+		return blob[2:]
+	}
+	// Not a valid TPM2B prefix, return as-is
+	return blob
+}
+
 // SaveBlobs saves AK blobs and LAK certificate to da.json (preserves agent data if present)
 func SaveBlobs(akPriv, akPub []byte, lakCertPEM, lakCACertPEM string) error {
 	blobPath := getBlobPath()
@@ -71,8 +99,9 @@ func SaveBlobs(akPriv, akPub []byte, lakCertPEM, lakCACertPEM string) error {
 		json.Unmarshal(jsonData, &storage)
 	}
 
-	// Update AK and LAK data
-	storage.AKPrivate = base64.StdEncoding.EncodeToString(akPriv)
+	// Private needs TPM2B prefix (Rust's Private::unmarshall expects it)
+	// Public is stored raw (Rust's Public::unmarshall expects no prefix)
+	storage.AKPrivate = base64.StdEncoding.EncodeToString(addTPM2BPrefix(akPriv))
 	storage.AKPublic = base64.StdEncoding.EncodeToString(akPub)
 	storage.LAKCertPEM = lakCertPEM
 	storage.LAKCACertPEM = lakCACertPEM
@@ -105,9 +134,10 @@ func SaveAgentBlobs(agentCertPEM string, agentKeyPriv, agentKeyPub []byte, agent
 		json.Unmarshal(jsonData, &storage)
 	}
 
-	// Update agent data
+	// Private needs TPM2B prefix (Rust's Private::unmarshall expects it)
+	// Public is stored raw (Rust's Public::unmarshall expects no prefix)
 	storage.AgentCertPEM = agentCertPEM
-	storage.AgentKeyPrivate = base64.StdEncoding.EncodeToString(agentKeyPriv)
+	storage.AgentKeyPrivate = base64.StdEncoding.EncodeToString(addTPM2BPrefix(agentKeyPriv))
 	storage.AgentKeyPublic = base64.StdEncoding.EncodeToString(agentKeyPub)
 	storage.AgentCACertPEM = agentCACertPEM
 	storage.Version = blobStorageVersion
@@ -151,15 +181,19 @@ func LoadBlobs() (akPriv, akPub []byte, lakCertPEM, lakCACertPEM string, exists 
 		return nil, nil, "", "", false, nil
 	}
 
-	akPriv, err = base64.StdEncoding.DecodeString(storage.AKPrivate)
+	akPrivBytes, err := base64.StdEncoding.DecodeString(storage.AKPrivate)
 	if err != nil {
 		return nil, nil, "", "", false, fmt.Errorf("failed to decode AK private: %w", err)
 	}
+	// Private has TPM2B prefix, strip for Go's raw format
+	akPriv = stripTPM2BPrefix(akPrivBytes)
 
-	akPub, err = base64.StdEncoding.DecodeString(storage.AKPublic)
+	akPubBytes, err := base64.StdEncoding.DecodeString(storage.AKPublic)
 	if err != nil {
 		return nil, nil, "", "", false, fmt.Errorf("failed to decode AK public: %w", err)
 	}
+	// Public is stored raw, stripTPM2BPrefix returns as-is
+	akPub = stripTPM2BPrefix(akPubBytes)
 
 	log.Printf("TPM blobs loaded")
 	return akPriv, akPub, storage.LAKCertPEM, storage.LAKCACertPEM, true, nil
@@ -188,15 +222,19 @@ func LoadAgentBlobs() (agentCertPEM string, agentKeyPriv, agentKeyPub []byte, ag
 		return "", nil, nil, "", false, nil
 	}
 
-	agentKeyPriv, err = base64.StdEncoding.DecodeString(storage.AgentKeyPrivate)
+	agentKeyPrivBytes, err := base64.StdEncoding.DecodeString(storage.AgentKeyPrivate)
 	if err != nil {
 		return "", nil, nil, "", false, fmt.Errorf("failed to decode agent key private: %w", err)
 	}
+	// Private has TPM2B prefix, strip for Go's raw format
+	agentKeyPriv = stripTPM2BPrefix(agentKeyPrivBytes)
 
-	agentKeyPub, err = base64.StdEncoding.DecodeString(storage.AgentKeyPublic)
+	agentKeyPubBytes, err := base64.StdEncoding.DecodeString(storage.AgentKeyPublic)
 	if err != nil {
 		return "", nil, nil, "", false, fmt.Errorf("failed to decode agent key public: %w", err)
 	}
+	// Public is stored raw, stripTPM2BPrefix returns as-is
+	agentKeyPub = stripTPM2BPrefix(agentKeyPubBytes)
 
 	log.Printf("Agent blobs loaded")
 	return storage.AgentCertPEM, agentKeyPriv, agentKeyPub, storage.AgentCACertPEM, true, nil

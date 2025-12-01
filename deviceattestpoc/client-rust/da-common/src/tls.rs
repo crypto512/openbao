@@ -1,12 +1,14 @@
 //! TLS and mTLS credential management for gRPC connections.
 
 use std::io::BufReader;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ClientConfig;
 use thiserror::Error;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+
+use crate::tpm::TpmClient;
 
 /// Parse server address into host and port
 fn parse_addr(addr: &str) -> Result<(String, u16), TlsError> {
@@ -412,5 +414,230 @@ pub async fn create_mtls_channel(
         .tls_config(tls_config)?;
 
     let channel = endpoint.connect().await?;
+    Ok(channel)
+}
+
+// ============================================================================
+// TPM-Backed mTLS Support
+// ============================================================================
+
+/// TPM-backed signing key for mTLS client authentication.
+///
+/// This implements rustls's `SigningKey` trait using TPM operations.
+/// The actual signing is performed by the TPM using the loaded agent key.
+struct TpmSigningKey {
+    tpm_client: Arc<Mutex<TpmClient>>,
+}
+
+impl TpmSigningKey {
+    fn new(tpm_client: Arc<Mutex<TpmClient>>) -> Self {
+        Self { tpm_client }
+    }
+}
+
+impl rustls::sign::SigningKey for TpmSigningKey {
+    fn choose_scheme(&self, offered: &[rustls::SignatureScheme]) -> Option<Box<dyn rustls::sign::Signer>> {
+        // TPM agent key is RSA 2048
+        // Prefer RSA-PSS (TLS 1.3) over PKCS#1 v1.5 (TLS 1.2)
+        let preferred = [
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+        ];
+
+        for scheme in preferred {
+            if offered.contains(&scheme) {
+                return Some(Box::new(TpmSigner {
+                    tpm_client: self.tpm_client.clone(),
+                    scheme,
+                }));
+            }
+        }
+        None
+    }
+
+    fn algorithm(&self) -> rustls::SignatureAlgorithm {
+        rustls::SignatureAlgorithm::RSA
+    }
+}
+
+impl std::fmt::Debug for TpmSigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TpmSigningKey").finish()
+    }
+}
+
+/// TPM-backed signer that performs actual signing operations.
+struct TpmSigner {
+    tpm_client: Arc<Mutex<TpmClient>>,
+    scheme: rustls::SignatureScheme,
+}
+
+impl rustls::sign::Signer for TpmSigner {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+        use sha2::{Sha256, Digest};
+
+        // rustls sends the raw message, we need to hash it first
+        let digest = Sha256::digest(message);
+
+        // Determine if we should use PSS or PKCS#1 v1.5
+        let use_pss = matches!(self.scheme, rustls::SignatureScheme::RSA_PSS_SHA256);
+
+        // Sign with TPM
+        let mut tpm = self.tpm_client.lock()
+            .map_err(|_| rustls::Error::General("TPM mutex poisoned".into()))?;
+
+        let result = if use_pss {
+            tpm.sign_with_agent_key_pss(&digest)
+        } else {
+            tpm.sign_with_agent_key(&digest)
+        };
+
+        result.map_err(|e| rustls::Error::General(format!("TPM signing failed: {}", e)))
+    }
+
+    fn scheme(&self) -> rustls::SignatureScheme {
+        self.scheme
+    }
+}
+
+impl std::fmt::Debug for TpmSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TpmSigner")
+            .field("scheme", &self.scheme)
+            .finish()
+    }
+}
+
+/// Client certificate resolver that uses TPM-backed signing.
+struct TpmClientCertResolver {
+    certified_key: Arc<rustls::sign::CertifiedKey>,
+}
+
+impl TpmClientCertResolver {
+    fn new(certs: Vec<CertificateDer<'static>>, signing_key: Arc<dyn rustls::sign::SigningKey>) -> Self {
+        Self {
+            certified_key: Arc::new(rustls::sign::CertifiedKey::new(certs, signing_key)),
+        }
+    }
+}
+
+impl rustls::client::ResolvesClientCert for TpmClientCertResolver {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[rustls::SignatureScheme],
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.certified_key.clone())
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for TpmClientCertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TpmClientCertResolver").finish()
+    }
+}
+
+/// TLS connector service for use with tonic's `connect_with_connector`.
+struct TpmTlsConnector {
+    tls_config: Arc<ClientConfig>,
+    server_name: rustls::pki_types::ServerName<'static>,
+}
+
+impl tower::Service<http::Uri> for TpmTlsConnector {
+    type Response = hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: http::Uri) -> Self::Future {
+        let tls_config = self.tls_config.clone();
+        let server_name = self.server_name.clone();
+
+        Box::pin(async move {
+            let host = uri.host().ok_or("missing host in URI")?;
+            let port = uri.port_u16().unwrap_or(443);
+            let addr = format!("{}:{}", host, port);
+
+            let tcp = tokio::net::TcpStream::connect(&addr).await?;
+            let connector = tokio_rustls::TlsConnector::from(tls_config);
+            let tls = connector.connect(server_name, tcp).await?;
+
+            // Wrap with TokioIo for hyper compatibility
+            Ok(hyper_util::rt::TokioIo::new(tls))
+        })
+    }
+}
+
+/// Create a gRPC channel with TPM-backed mTLS authentication.
+///
+/// This uses the TPM to perform client certificate signing operations,
+/// keeping the private key protected in hardware.
+///
+/// # Arguments
+/// * `server_addr` - Server address in "host:port" format
+/// * `ca_pem` - PEM-encoded CA certificate for server verification
+/// * `client_cert_pem` - PEM-encoded client certificate chain
+/// * `tpm_client` - TPM client with agent key loaded
+///
+/// # Prerequisites
+/// The `tpm_client` must have the agent key loaded via `load_agent_key()`.
+pub async fn create_tpm_mtls_channel(
+    server_addr: &str,
+    ca_pem: &str,
+    client_cert_pem: &str,
+    tpm_client: Arc<Mutex<TpmClient>>,
+) -> Result<Channel, TlsError> {
+    // Parse server address
+    let (host, _port) = parse_addr(server_addr)?;
+
+    // Parse CA certificates
+    let ca_certs = parse_pem_certs(ca_pem)?;
+    let mut root_store = rustls::RootCertStore::empty();
+    for cert in ca_certs {
+        root_store.add(cert)
+            .map_err(|e| TlsError::CaParseError(e.to_string()))?;
+    }
+
+    // Parse client certificate chain
+    let client_certs = parse_pem_certs(client_cert_pem)?;
+
+    // Create TPM-backed signing key and resolver
+    let signing_key: Arc<dyn rustls::sign::SigningKey> = Arc::new(TpmSigningKey::new(tpm_client));
+    let cert_resolver = Arc::new(TpmClientCertResolver::new(client_certs, signing_key));
+
+    // Build rustls config with TPM-backed client cert resolver
+    let mut tls_config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_client_cert_resolver(cert_resolver);
+
+    // Enable ALPN for HTTP/2 - required for gRPC
+    tls_config.alpn_protocols = vec![b"h2".to_vec()];
+    let tls_config = Arc::new(tls_config);
+
+    // Create server name for TLS
+    let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|e| TlsError::ConfigError(format!("Invalid server name: {}", e)))?
+        .to_owned();
+
+    // Create custom TLS connector
+    let connector = TpmTlsConnector {
+        tls_config,
+        server_name,
+    };
+
+    // Connect using tonic's connect_with_connector
+    // Use http:// scheme because our custom connector handles TLS
+    let endpoint = Endpoint::from_shared(format!("http://{}", server_addr))
+        .map_err(|e| TlsError::ConfigError(e.to_string()))?;
+
+    let channel = endpoint.connect_with_connector(connector).await?;
+
     Ok(channel)
 }

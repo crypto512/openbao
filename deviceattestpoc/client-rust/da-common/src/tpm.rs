@@ -616,11 +616,11 @@ impl TpmClient {
         Ok(())
     }
 
-    /// Load AK from saved blobs
+    /// Load AK from saved blobs (TPM2B format with size prefix)
     fn load_ak_from_blobs(&mut self, priv_blob: &[u8], pub_blob: &[u8]) -> Result<(), TpmError> {
         let srk_handle = self.srk_handle.ok_or(TpmError::NoSrk)?;
 
-        // Deserialize blobs
+        // Private blob has TPM2B prefix, Public blob is raw TPMT format
         let private = Private::unmarshall(priv_blob)?;
         let public = Public::unmarshall(pub_blob)?;
 
@@ -636,11 +636,13 @@ impl TpmClient {
         Ok(())
     }
 
-    /// Save AK blobs to storage
+    /// Save AK blobs to storage (TPM2B format with size prefix)
     fn save_blobs(&self) -> Result<(), TpmError> {
         let ak_priv = self.ak_private.as_ref().ok_or(TpmError::NoAk)?;
         let ak_pub = self.ak_public.as_ref().ok_or(TpmError::NoAk)?;
 
+        // Private::marshall() returns TPM2B format (with prefix)
+        // Public::marshall() returns raw TPMT format (no prefix)
         let priv_bytes = ak_priv.marshall()?;
         let pub_bytes = ak_pub.marshall()?;
 
@@ -831,6 +833,7 @@ impl TpmClient {
     }
 
     /// Create a non-restricted signing key for agent certificate
+    /// Returns blobs in TPM2B format (2-byte size prefix + data)
     pub fn create_agent_key(&mut self) -> Result<(Vec<u8>, Vec<u8>), TpmError> {
         let srk_handle = self.srk_handle.ok_or(TpmError::NoSrk)?;
 
@@ -873,6 +876,7 @@ impl TpmClient {
 
         self.agent_key_handle = Some(key_handle);
 
+        // Both Private::marshall() and Public::marshall() return TPM2B format
         let priv_bytes = result.out_private.marshall()?;
         let pub_bytes = result.out_public.marshall()?;
 
@@ -880,10 +884,11 @@ impl TpmClient {
         Ok((priv_bytes, pub_bytes))
     }
 
-    /// Load agent key from blobs
+    /// Load agent key from blobs (TPM2B format with size prefix)
     pub fn load_agent_key(&mut self, priv_blob: &[u8], pub_blob: &[u8]) -> Result<(), TpmError> {
         let srk_handle = self.srk_handle.ok_or(TpmError::NoSrk)?;
 
+        // Blobs are in TPM2B format (2-byte size prefix + data)
         let private = Private::unmarshall(priv_blob)?;
         let public = Public::unmarshall(pub_blob)?;
 
@@ -1078,6 +1083,35 @@ impl TpmClient {
         }
     }
 
+    /// Sign data with agent key using RSA-PSS
+    pub fn sign_with_agent_key_pss(&mut self, digest: &[u8]) -> Result<Vec<u8>, TpmError> {
+        let agent_key_handle = self.agent_key_handle.ok_or(TpmError::NoAgentKey)?;
+
+        // Convert digest to fixed-size array for SHA256 (32 bytes)
+        let digest_array: [u8; 32] = digest.try_into()
+            .map_err(|_| TpmError::InvalidKeyType)?;
+        let tpm_digest = TpmDigest::from(digest_array);
+
+        use tss_esapi::structures::HashcheckTicket;
+        let signature = self.context.execute_with_nullauth_session(|ctx| {
+            ctx.sign(
+                agent_key_handle,
+                tpm_digest,
+                SignatureScheme::RsaPss {
+                    scheme: HashScheme::new(HashingAlgorithm::Sha256),
+                },
+                None::<HashcheckTicket>,
+            )
+        })?;
+
+        // Extract raw signature from TPMT_SIGNATURE
+        // For RSAPSS, extract the signature value
+        match signature {
+            Signature::RsaPss(rsa_sig) => Ok(rsa_sig.signature().to_vec()),
+            _ => Err(TpmError::InvalidKeyType),
+        }
+    }
+
     /// Get agent key public key
     pub fn get_agent_public_key(&self) -> Option<&Public> {
         self.agent_key_public.as_ref()
@@ -1182,3 +1216,4 @@ impl rcgen::RemoteKeyPair for TpmSigningKey {
         }
     }
 }
+
