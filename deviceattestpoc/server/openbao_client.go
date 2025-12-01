@@ -1014,6 +1014,7 @@ func getECDSASigAlgorithm(curve elliptic.Curve) asn1.ObjectIdentifier {
 }
 
 // RequestServerCertificate requests a TLS certificate from OpenBao pki-grpc for the server
+// Returns the full certificate chain (leaf + CA) for proper TLS validation
 func (c *OpenBaoClient) RequestServerCertificate(ctx context.Context, cn string, sans []string) (certPEM, keyPEM string, err error) {
 	payload := map[string]interface{}{
 		"common_name": cn,
@@ -1042,15 +1043,25 @@ func (c *OpenBaoClient) RequestServerCertificate(ctx context.Context, cn string,
 
 	var issueResp struct {
 		Data struct {
-			Certificate string `json:"certificate"`
-			PrivateKey  string `json:"private_key"`
+			Certificate string   `json:"certificate"`
+			PrivateKey  string   `json:"private_key"`
+			CAChain     []string `json:"ca_chain"`
+			IssuingCA   string   `json:"issuing_ca"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &issueResp); err != nil {
 		return "", "", err
 	}
 
-	return issueResp.Data.Certificate, issueResp.Data.PrivateKey, nil
+	// Build full certificate chain: leaf cert + CA chain
+	fullChain := issueResp.Data.Certificate
+	if len(issueResp.Data.CAChain) > 0 {
+		fullChain += "\n" + strings.Join(issueResp.Data.CAChain, "\n")
+	} else if issueResp.Data.IssuingCA != "" {
+		fullChain += "\n" + issueResp.Data.IssuingCA
+	}
+
+	return fullChain, issueResp.Data.PrivateKey, nil
 }
 
 // SignCertificate uses sign-verbatim to issue a certificate for mTLS-authenticated requests
