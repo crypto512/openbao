@@ -326,26 +326,57 @@ pub async fn create_tofu_channel(
     }
 
     let captured = Arc::new(Mutex::new(None));
-    let _verifier = Arc::new(SpkiVerifier {
+    let verifier = Arc::new(SpkiVerifier {
         expected_pin: expected_pin.to_string(),
         captured: captured.clone(),
     });
 
-    // For now, use insecure mode and validate manually
-    // A proper implementation would integrate the custom verifier
-    let tls_config = ClientTlsConfig::new().domain_name("server");
+    // Build rustls config with custom SPKI verifier
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+
+    // Use tokio-rustls connector with our custom config
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+
+    // Parse address
+    let (host, port) = parse_addr(server_addr)?;
+
+    // Connect TCP
+    let tcp = tokio::net::TcpStream::connect(format!("{}:{}", host, port))
+        .await
+        .map_err(|e| TlsError::ConnectionError(e.to_string()))?;
+
+    // Connect TLS with our custom SPKI verifier
+    let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|e| TlsError::ConfigError(e.to_string()))?;
+
+    let tls_stream = connector.connect(server_name, tcp)
+        .await
+        .map_err(|e| TlsError::ConnectionError(e.to_string()))?;
+
+    // Get the captured result after the handshake (SPKI pin was verified)
+    let result = captured
+        .lock()
+        .expect("mutex not poisoned")
+        .clone()
+        .ok_or_else(|| TlsError::ConfigError("TOFU verification failed".into()))?;
+
+    // Drop the TLS stream - we only needed it to verify SPKI and capture the CA
+    drop(tls_stream);
+
+    // Create a channel using the captured and verified CA
+    let ca_cert = tonic::transport::Certificate::from_pem(result.ca_pem.clone());
+    let tls_config = ClientTlsConfig::new()
+        .domain_name(host)
+        .ca_certificate(ca_cert);
 
     let endpoint = Endpoint::from_shared(format!("https://{}", server_addr))
         .map_err(|e| TlsError::ConfigError(e.to_string()))?
         .tls_config(tls_config)?;
 
     let channel = endpoint.connect().await?;
-
-    let result = captured
-        .lock()
-        .expect("mutex not poisoned")
-        .clone()
-        .ok_or_else(|| TlsError::ConfigError("TOFU verification failed".into()))?;
 
     Ok((channel, result))
 }
