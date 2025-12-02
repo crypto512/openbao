@@ -2,7 +2,7 @@
 # Device attestation tools: da-init, da-fingerprint, da-lak, da-agent, da-gen
 # Rust client tools: dar-init, dar-fingerprint, dar-lak, dar-agent, dar-gen
 
-.PHONY: help build build-client build-client-rust bin bin-rust clean clean-client clean-pki clean-swtpm run-server
+.PHONY: help build build-client build-client-rust bin bin-windows bin-rust clean clean-client clean-pki clean-swtpm run-server
 .PHONY: da-init da-fingerprint da-lak da-agent da-gen
 .PHONY: dar-init dar-fingerprint dar-lak dar-agent dar-gen
 
@@ -13,7 +13,8 @@ help:
 	@echo "  make build                - Build all containers (Go + Rust clients)"
 	@echo "  make build-client         - Build Go client container only"
 	@echo "  make build-client-rust    - Build Rust client container only"
-	@echo "  make bin                  - Extract Go binaries to ./bin/"
+	@echo "  make bin                  - Extract Go binaries (Linux) to ./bin/"
+	@echo "  make bin-windows          - Extract Go binaries (Windows) to ./bin/windows/"
 	@echo "  make bin-rust             - Extract Rust binaries to ./bin/"
 	@echo "  make clean                - Clean containers, volumes, and images"
 	@echo ""
@@ -101,6 +102,21 @@ bin-rust: build-client-rust
 	@docker rm -f dar-bin-extract
 	@echo "✓ Rust binaries extracted:"
 	@ls -la bin/dar-*
+
+# Extract Windows Go binaries from client container to ./bin/windows/
+bin-windows: build-client
+	@echo "Extracting Windows Go binaries to ./bin/windows/..."
+	@mkdir -p bin/windows
+	@docker create --name da-bin-extract-win deviceattestpoc-client true 2>/dev/null || \
+		(docker rm -f da-bin-extract-win 2>/dev/null && docker create --name da-bin-extract-win deviceattestpoc-client true)
+	@docker cp da-bin-extract-win:/bin/windows/da-init.exe bin/windows/
+	@docker cp da-bin-extract-win:/bin/windows/da-fingerprint.exe bin/windows/
+	@docker cp da-bin-extract-win:/bin/windows/da-lak.exe bin/windows/
+	@docker cp da-bin-extract-win:/bin/windows/da-agent.exe bin/windows/
+	@docker cp da-bin-extract-win:/bin/windows/da-gen.exe bin/windows/
+	@docker rm -f da-bin-extract-win
+	@echo "✓ Windows binaries extracted:"
+	@ls -la bin/windows/da-*.exe
 
 # Clean containers, volumes, and images
 clean:

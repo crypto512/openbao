@@ -32,8 +32,9 @@ COPY cmd/ ./cmd/
 
 # Build da-fingerprint (standalone - no proto dependency)
 # Static build with musl for portability across Linux distributions
+# Note: Copies all .go files including platform-specific tpm_open_*.go for Windows cross-compile
 RUN mkdir -p /build/bin/da-fingerprint && \
-    cp cmd/da-fingerprint/main.go /build/bin/da-fingerprint/ && \
+    cp cmd/da-fingerprint/*.go /build/bin/da-fingerprint/ && \
     cd /build/bin/da-fingerprint && \
     go mod init da-fingerprint && \
     go mod edit -require=github.com/google/go-tpm@v0.9.7 && \
@@ -93,6 +94,19 @@ RUN mkdir -p /build/bin/da-gen/proto && \
     go mod tidy && \
     CGO_ENABLED=1 GOOS=linux go build -ldflags='-linkmode external -extldflags "-static"' -o /bin/da-gen .
 
+# Build Windows binaries (cross-compilation, pure Go - no CGO needed)
+RUN mkdir -p /bin/windows && \
+    cd /build/bin/da-fingerprint && \
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /bin/windows/da-fingerprint.exe . && \
+    cd /build/bin/da-init && \
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /bin/windows/da-init.exe . && \
+    cd /build/bin/da-lak && \
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /bin/windows/da-lak.exe . && \
+    cd /build/bin/da-agent && \
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /bin/windows/da-agent.exe . && \
+    cd /build/bin/da-gen && \
+    GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /bin/windows/da-gen.exe .
+
 # Runtime stage
 FROM alpine:3.22
 
@@ -102,12 +116,15 @@ RUN apk add --no-cache ca-certificates libc6-compat socat
 # Create directories for da.json and certificates
 RUN mkdir -p /certs /etc/da && chmod 755 /etc/da
 
-# Copy binaries
+# Copy Linux binaries
 COPY --from=builder /bin/da-fingerprint /bin/da-fingerprint
 COPY --from=builder /bin/da-init /bin/da-init
 COPY --from=builder /bin/da-lak /bin/da-lak
 COPY --from=builder /bin/da-agent /bin/da-agent
 COPY --from=builder /bin/da-gen /bin/da-gen
+
+# Copy Windows binaries
+COPY --from=builder /bin/windows /bin/windows
 
 # Copy entrypoint for swtpm proxy setup
 COPY --chmod=755 client/entrypoint.sh /entrypoint.sh

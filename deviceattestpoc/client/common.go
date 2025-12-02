@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 
 	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
@@ -17,6 +19,9 @@ import (
 func GetDAConfigPath() string {
 	if path := os.Getenv("DA_JSON_PATH"); path != "" {
 		return path
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("PROGRAMDATA"), "DeviceAttest", "da.json")
 	}
 	return "/etc/da.json"
 }
@@ -43,12 +48,21 @@ func GetEKCertFromTPM(rwc io.ReadWriteCloser) (*x509.Certificate, error) {
 	return x509.ParseCertificate(certDER)
 }
 
+// GetDefaultTPMDevice returns the platform-appropriate default TPM device path
+func GetDefaultTPMDevice() string {
+	if runtime.GOOS == "windows" {
+		return "" // go-tpm uses Windows TBS API automatically when path is empty
+	}
+	return "/dev/tpmrm0"
+}
+
 // InitTPMConnection opens a connection to the TPM device
+// Uses platform-specific openTPM() defined in tpm_open_*.go
 func InitTPMConnection(tpmDevice string) (io.ReadWriteCloser, error) {
 	if tpmDevice == "" {
-		tpmDevice = "/dev/tpmrm0"
+		tpmDevice = GetDefaultTPMDevice()
 	}
-	return tpm2.OpenTPM(tpmDevice)
+	return openTPM(tpmDevice)
 }
 
 // GetConfigString returns config value from flag, env var, or default (in order of priority)

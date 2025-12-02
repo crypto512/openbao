@@ -378,14 +378,25 @@ Note: da-gen auto-refreshes expired LAK/agent certificates if needed (self-heali
 
 ## Make Targets
 
+### Build Targets
+
 | Target | Description |
 |--------|-------------|
-| `make build` | Build all containers with Docker Buildx |
-| `make bin` | Extract binaries (`da-*`) to `./bin/` |
+| `make build` | Build all containers (Go + Rust clients) |
+| `make build-client` | Build Go client container only |
+| `make build-client-rust` | Build Rust client container only |
+| `make bin` | Extract Go binaries (Linux) to `./bin/` |
+| `make bin-windows` | Extract Go binaries (Windows) to `./bin/windows/` |
+| `make bin-rust` | Extract Rust binaries (Linux) to `./bin/` |
 | `make clean` | Remove containers, volumes, and images |
 | `make clean-client` | Clean client state (LAK, agent, certificates) |
 | `make clean-pki` | Clean OpenBao PKI (requires clean-client) |
 | `make clean-swtpm` | Clean SWTPM state and container (new EK, clears DA lockout) |
+
+### Go Client Tools (da-*)
+
+| Target | Description |
+|--------|-------------|
 | `make run-server` | Start infrastructure (OpenBao + Server + SWTPM) |
 | `make da-fingerprint` | Display permanent identifier (admin provisioning) |
 | `make da-init` | Bootstrap device trust (--force mode for dev/testing) |
@@ -394,17 +405,30 @@ Note: da-gen auto-refreshes expired LAK/agent certificates if needed (self-heali
 | `make da-agent` | Provision agent certificate (ACME device-attest-01) |
 | `make da-gen USAGE=<name> [OUTPUT=<dir>]` | Generate usage certificate (mTLS, self-healing) |
 
+### Rust Client Tools (dar-*)
+
+| Target | Description |
+|--------|-------------|
+| `make dar-fingerprint` | Display permanent identifier (Rust client) |
+| `make dar-init` | Bootstrap device trust (Rust client) |
+| `make dar-init SPKI=<pin>` | Bootstrap with SPKI pin verification (Rust client) |
+| `make dar-lak` | Provision LAK certificate (Rust client) |
+| `make dar-agent` | Provision agent certificate (Rust client) |
+| `make dar-gen USAGE=<name> [OUTPUT=<dir>]` | Generate usage certificate (Rust client) |
+
 ## Components
 
 ### Client Tools
 
-| Tool | Standard | Purpose |
-|------|----------|---------|
-| `da-fingerprint` | - | Compute and display permanent ID from EK (admin provisioning) |
-| `da-init` | TOFU | Bootstrap device trust, chain to da-lak and da-agent |
-| `da-lak` | TCG Credential Profiles | Provision LAK via credential activation |
-| `da-agent` | draft-acme-device-attest-07 | Provision agent cert via TPM attestation |
-| `da-gen` | mTLS | Generate usage certificates with agent cert (self-healing) |
+Two client implementations are provided with identical functionality:
+
+| Go Tool | Rust Tool | Standard | Purpose |
+|---------|-----------|----------|---------|
+| `da-fingerprint` | `dar-fingerprint` | - | Compute and display permanent ID from EK |
+| `da-init` | `dar-init` | TOFU | Bootstrap device trust |
+| `da-lak` | `dar-lak` | TCG Credential Profiles | Provision LAK via credential activation |
+| `da-agent` | `dar-agent` | draft-acme-device-attest-07 | Provision agent cert via TPM attestation |
+| `da-gen` | `dar-gen` | mTLS | Generate usage certificates (self-healing) |
 
 ### Server (gRPC + Web)
 
@@ -496,6 +520,41 @@ Software TPM 2.0 emulator (libtpms + swtpm):
 | [WebAuthn TPM Attestation](https://www.w3.org/TR/webauthn-2/#sctn-tpm-attestation) | Attestation object format |
 | [TCG TPM 2.0 Library](https://trustedcomputinggroup.org/resource/tpm-library-specification/) | TPM2_Certify, TPM2_ActivateCredential |
 | [RFC 8555](https://datatracker.ietf.org/doc/html/rfc8555) | ACME Protocol base |
+
+## Platform Support
+
+### Go Client (da-*)
+
+| Platform | Status | TPM Access |
+|----------|--------|------------|
+| **Linux** | ✅ Fully supported | `/dev/tpmrm0` device |
+| **Windows** | ✅ Fully supported | Windows TBS API |
+
+Both Linux and Windows binaries are cross-compiled from the same Docker build.
+
+**Build:**
+```bash
+make bin          # Linux binaries → ./bin/
+make bin-windows  # Windows binaries → ./bin/windows/
+```
+
+**Windows Configuration:**
+- Config path: `%PROGRAMDATA%\DeviceAttest\da.json`
+- TPM access: Automatic via Windows TBS API (no device path needed)
+- Requires TPM 2.0 hardware or Hyper-V vTPM
+
+### Rust Client (dar-*)
+
+| Platform | Status | TPM Access |
+|----------|--------|------------|
+| **Linux** | ✅ Fully supported | tpm2-tss via tss-esapi |
+
+The Rust client provides identical functionality to the Go client using the `tss-esapi` crate for TPM 2.0 access.
+
+**Build:**
+```bash
+make bin-rust     # Linux binaries → ./bin/
+```
 
 ## Limitations (PoC)
 

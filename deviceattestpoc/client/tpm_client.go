@@ -84,10 +84,10 @@ func NewTPMClientForEnrollment(tpmPath string) (*TPMClient, error) {
 	log.Printf("Initializing TPM client")
 
 	if tpmPath == "" {
-		tpmPath = "/dev/tpmrm0"
+		tpmPath = GetDefaultTPMDevice()
 	}
 
-	rwc, err := tpm2.OpenTPM(tpmPath)
+	rwc, err := openTPM(tpmPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open TPM at %s: %w", tpmPath, err)
 	}
