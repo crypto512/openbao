@@ -7,13 +7,22 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 )
+
+func init() {
+	// Suppress log.Printf output unless LOG_LEVEL=debug
+	if !strings.EqualFold(os.Getenv("LOG_LEVEL"), "debug") {
+		log.SetOutput(io.Discard)
+	}
+}
 
 // GetDAConfigPath returns the path to da.json configuration file
 func GetDAConfigPath() string {

@@ -42,7 +42,7 @@ func (db *DB) SetSetting(key, value string) error {
 func (db *DB) GetAutoApprove() (bool, error) {
 	value, err := db.GetSetting("auto_approve")
 	if err != nil {
-		return true, err
+		return false, err
 	}
 	return value == "true", nil
 }

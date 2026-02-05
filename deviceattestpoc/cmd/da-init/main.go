@@ -2,9 +2,15 @@
 // This is the entry point for device initialization.
 //
 // Usage:
-//   da-init <server-address> <spki-pin>  - First-time TOFU setup with SPKI verification
-//   da-init --force <server-address>     - First-time setup without SPKI verification (insecure)
-//   da-init                              - Full reinit (clears LAK/agent, re-provisions)
+//   da-init <server-address> <spki-pin>            - First-time TOFU setup with SPKI verification
+//   da-init --force <server-address>               - First-time setup without SPKI verification (insecure)
+//   da-init                                        - Full reinit (clears LAK/agent, re-provisions)
+//   da-init --manual <server-address> <spki-pin>   - TOFU setup only (no auto da-lak/da-agent)
+//   da-init --manual --force <server-address>      - Force setup only (no auto da-lak/da-agent)
+//   da-init --manual                               - Reinit setup only (no auto da-lak/da-agent)
+//
+// The --manual flag configures the trust anchor but skips automatic chaining
+// to da-lak and da-agent, letting you run them separately.
 //
 // The SPKI pin is displayed by the server on startup and should be provided
 // out-of-band (e.g., printed documentation, QR code, secure email).
@@ -12,8 +18,8 @@
 // On successful setup:
 // 1. Server CA is verified against the SPKI pin (unless --force is used)
 // 2. Server address and CA chain are persisted to da.json
-// 3. da-lak is executed to provision LAK certificate
-// 4. da-agent is executed to provision agent certificate
+// 3. da-lak is executed to provision LAK certificate (unless --manual)
+// 4. da-agent is executed to provision agent certificate (unless --manual)
 package main
 
 import (
@@ -21,7 +27,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -32,38 +37,49 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("Error: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
 func run() error {
-	// Check for --force flag
-	if len(os.Args) >= 2 && os.Args[1] == "--force" {
-		if len(os.Args) != 3 {
-			fmt.Fprintf(os.Stderr, "Usage: da-init --force <server-address>\n")
-			os.Exit(1)
+	// Strip --manual flag from args
+	manual := false
+	var args []string
+	for _, a := range os.Args[1:] {
+		if a == "--manual" {
+			manual = true
+		} else {
+			args = append(args, a)
 		}
-		serverAddr := os.Args[2]
-		return runForce(serverAddr)
 	}
 
-	switch len(os.Args) {
-	case 1:
+	// Check for --force flag
+	if len(args) >= 1 && args[0] == "--force" {
+		if len(args) != 2 {
+			fmt.Fprintf(os.Stderr, "Usage: da-init [--manual] --force <server-address>\n")
+			os.Exit(1)
+		}
+		return runForce(args[1], manual)
+	}
+
+	switch len(args) {
+	case 0:
 		// Reinit mode: no arguments
-		return runReinit()
-	case 3:
+		return runReinit(manual)
+	case 2:
 		// TOFU mode: server-address and spki-pin
-		serverAddr := os.Args[1]
-		spkiPin := os.Args[2]
-		return runTOFU(serverAddr, spkiPin)
+		return runTOFU(args[0], args[1], manual)
 	default:
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  da-init <server-address> <spki-pin>  - First-time TOFU setup\n")
 		fmt.Fprintf(os.Stderr, "  da-init --force <server-address>     - Setup without SPKI verification (insecure)\n")
 		fmt.Fprintf(os.Stderr, "  da-init                              - Full reinit\n")
+		fmt.Fprintf(os.Stderr, "\nAdd --manual to skip automatic da-lak/da-agent chaining.\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  da-init grpc-server:50051 sha256//abc123...\n")
 		fmt.Fprintf(os.Stderr, "  da-init --force grpc-server:50051\n")
+		fmt.Fprintf(os.Stderr, "  da-init --manual --force grpc-server:50051\n")
 		fmt.Fprintf(os.Stderr, "  da-init\n")
 		os.Exit(1)
 		return nil
@@ -71,18 +87,16 @@ func run() error {
 }
 
 // runTOFU performs Trust-On-First-Use setup
-func runTOFU(serverAddr, spkiPin string) error {
-	log.Printf("da-init: TOFU Setup")
-	log.Printf("Server: %s", serverAddr)
-	log.Printf("SPKI Pin: %s", spkiPin)
+func runTOFU(serverAddr, spkiPin string, manual bool) error {
+	fmt.Fprintf(os.Stderr, "── da-init: TOFU Bootstrap ──────────────────────────────────\n")
+	fmt.Fprintf(os.Stderr, "  Server:   %s\n", serverAddr)
+	fmt.Fprintf(os.Stderr, "  SPKI Pin: %s\n", spkiPin)
 
 	// Create TOFU TLS credentials
 	creds, getResult, err := NewTLSCredentialsWithTOFU(spkiPin)
 	if err != nil {
 		return fmt.Errorf("invalid SPKI pin: %w", err)
 	}
-
-	log.Printf("Connecting to %s...", serverAddr)
 
 	// Connect using TOFU credentials - TLS handshake triggers pin verification
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -98,7 +112,6 @@ func runTOFU(serverAddr, spkiPin string) error {
 	defer conn.Close()
 
 	// Make a simple call to ensure connection is working
-	// We use EnrollTPM with empty request - it will fail but proves connectivity
 	client := pb.NewCertificateServiceClient(conn)
 	_, _ = client.EnrollTPM(ctx, &pb.TPMEnrollmentRequest{})
 
@@ -108,10 +121,9 @@ func runTOFU(serverAddr, spkiPin string) error {
 		return fmt.Errorf("TOFU verification failed: no result captured")
 	}
 
-	log.Printf("SPKI pin verified")
+	fmt.Fprintf(os.Stderr, "  SPKI pin verified\n")
 
 	// Clear existing LAK/agent certificates
-	log.Printf("Clearing existing certificates...")
 	if err := ClearLAKBlobs(); err != nil {
 		return fmt.Errorf("failed to clear LAK blobs: %w", err)
 	}
@@ -123,33 +135,35 @@ func runTOFU(serverAddr, spkiPin string) error {
 	if err := SaveServerConfig(serverAddr, result.CAPem, result.SPKIPin); err != nil {
 		return fmt.Errorf("failed to save server config: %w", err)
 	}
-	log.Printf("Server CA saved to %s", GetBlobPath())
+	fmt.Fprintf(os.Stderr, "  Server CA saved to %s\n", GetBlobPath())
 
 	conn.Close() // Close TOFU connection before chaining to other tools
 
-	// Chain to da-lak
-	log.Printf("")
-	log.Printf("Running da-lak...")
+	if manual {
+		fmt.Fprintf(os.Stderr, "  Trust anchor configured (manual mode)\n")
+		fmt.Fprintf(os.Stderr, "  Next: run da-lak, then da-agent\n")
+		return nil
+	}
+
+	// Chain to da-lak (Phase 1: TCG Credential Activation)
+	fmt.Fprintln(os.Stderr)
 	if err := RunTool("da-lak"); err != nil {
 		return fmt.Errorf("da-lak failed: %w", err)
 	}
 
-	// Chain to da-agent
-	log.Printf("")
-	log.Printf("Running da-agent...")
+	// Chain to da-agent (Phase 2: ACME device-attest-01)
+	fmt.Fprintln(os.Stderr)
 	if err := RunTool("da-agent"); err != nil {
 		return fmt.Errorf("da-agent failed: %w", err)
 	}
 
-	log.Printf("")
-	log.Printf("Device initialized successfully!")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "── Device initialized successfully! ─────────────────────────\n")
 	return nil
 }
 
 // runReinit performs a full reinitialization using existing server config
-func runReinit() error {
-	log.Printf("da-init: Full Reinit")
-
+func runReinit(manual bool) error {
 	// Load existing server config
 	serverAddr, _, _, exists, err := LoadServerConfig()
 	if err != nil {
@@ -159,10 +173,10 @@ func runReinit() error {
 		return fmt.Errorf("not configured. Run: da-init <server-address> <spki-pin>")
 	}
 
-	log.Printf("Server: %s", serverAddr)
+	fmt.Fprintf(os.Stderr, "── da-init: Reinitialize ────────────────────────────────────\n")
+	fmt.Fprintf(os.Stderr, "  Server: %s\n", serverAddr)
 
 	// Clear existing LAK/agent certificates
-	log.Printf("Clearing LAK and agent certificates...")
 	if err := ClearLAKBlobs(); err != nil {
 		return fmt.Errorf("failed to clear LAK blobs: %w", err)
 	}
@@ -170,38 +184,40 @@ func runReinit() error {
 		return fmt.Errorf("failed to clear agent blobs: %w", err)
 	}
 
-	// Chain to da-lak
-	log.Printf("")
-	log.Printf("Running da-lak...")
+	if manual {
+		fmt.Fprintf(os.Stderr, "  Trust anchor configured (manual mode)\n")
+		fmt.Fprintf(os.Stderr, "  Next: run da-lak, then da-agent\n")
+		return nil
+	}
+
+	// Chain to da-lak (Phase 1: TCG Credential Activation)
+	fmt.Fprintln(os.Stderr)
 	if err := RunTool("da-lak"); err != nil {
 		return fmt.Errorf("da-lak failed: %w", err)
 	}
 
-	// Chain to da-agent
-	log.Printf("")
-	log.Printf("Running da-agent...")
+	// Chain to da-agent (Phase 2: ACME device-attest-01)
+	fmt.Fprintln(os.Stderr)
 	if err := RunTool("da-agent"); err != nil {
 		return fmt.Errorf("da-agent failed: %w", err)
 	}
 
-	log.Printf("")
-	log.Printf("Device reinitialized successfully!")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "── Device reinitialized successfully! ───────────────────────\n")
 	return nil
 }
 
 // runForce performs setup without SPKI verification (insecure, for development/testing)
-func runForce(serverAddr string) error {
-	log.Printf("da-init: Force Setup (no SPKI verification)")
-	log.Printf("WARNING: Skipping SPKI verification - use only for development/testing!")
-	log.Printf("Server: %s", serverAddr)
+func runForce(serverAddr string, manual bool) error {
+	fmt.Fprintf(os.Stderr, "── da-init: Force Bootstrap (no SPKI) ──────────────────────\n")
+	fmt.Fprintf(os.Stderr, "  WARNING: Skipping SPKI verification - dev/testing only!\n")
+	fmt.Fprintf(os.Stderr, "  Server: %s\n", serverAddr)
 
 	// Create insecure TLS credentials that accept any certificate
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true,
 	}
 	creds := credentials.NewTLS(tlsConfig)
-
-	log.Printf("Connecting to %s...", serverAddr)
 
 	// Connect to server
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -216,9 +232,7 @@ func runForce(serverAddr string) error {
 	}
 	defer conn.Close()
 
-	// Get the server's certificate chain
-	state := conn.GetState()
-	log.Printf("Connection state: %v", state)
+	// Debug: connection state visible with LOG_LEVEL=debug via common.go init()
 
 	// Make a call to trigger TLS handshake and get peer certificates
 	client := pb.NewCertificateServiceClient(conn)
@@ -267,11 +281,10 @@ func runForce(serverAddr string) error {
 		return fmt.Errorf("failed to capture server CA")
 	}
 
-	log.Printf("Server SPKI Pin: %s", spkiPin)
-	log.Printf("Captured server CA")
+	fmt.Fprintf(os.Stderr, "  SPKI Pin: %s\n", spkiPin)
+	fmt.Fprintf(os.Stderr, "  Server CA saved to %s\n", GetBlobPath())
 
 	// Clear existing LAK/agent certificates
-	log.Printf("Clearing existing certificates...")
 	if err := ClearLAKBlobs(); err != nil {
 		return fmt.Errorf("failed to clear LAK blobs: %w", err)
 	}
@@ -283,25 +296,28 @@ func runForce(serverAddr string) error {
 	if err := SaveServerConfig(serverAddr, caPEM, spkiPin); err != nil {
 		return fmt.Errorf("failed to save server config: %w", err)
 	}
-	log.Printf("Server CA saved to %s", GetBlobPath())
 
 	conn.Close() // Close connection before chaining to other tools
 
-	// Chain to da-lak
-	log.Printf("")
-	log.Printf("Running da-lak...")
+	if manual {
+		fmt.Fprintf(os.Stderr, "  Trust anchor configured (manual mode)\n")
+		fmt.Fprintf(os.Stderr, "  Next: run da-lak, then da-agent\n")
+		return nil
+	}
+
+	// Chain to da-lak (Phase 1: TCG Credential Activation)
+	fmt.Fprintln(os.Stderr)
 	if err := RunTool("da-lak"); err != nil {
 		return fmt.Errorf("da-lak failed: %w", err)
 	}
 
-	// Chain to da-agent
-	log.Printf("")
-	log.Printf("Running da-agent...")
+	// Chain to da-agent (Phase 2: ACME device-attest-01)
+	fmt.Fprintln(os.Stderr)
 	if err := RunTool("da-agent"); err != nil {
 		return fmt.Errorf("da-agent failed: %w", err)
 	}
 
-	log.Printf("")
-	log.Printf("Device initialized successfully!")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintf(os.Stderr, "── Device initialized successfully! ─────────────────────────\n")
 	return nil
 }

@@ -1,0 +1,363 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 900">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#374151"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#059669"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#d97706"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrow-red" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+    <marker id="arrow-bi" markerWidth="10" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <polygon points="0 3.5, 5 0, 10 3.5, 5 7" fill="#2563eb"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="900" fill="#fafafa"/>
+
+  <!-- Title -->
+  <text x="500" y="35" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="bold" fill="#1f2937">Device Attestation - Cryptographic Trust Chain</text>
+  <text x="500" y="55" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#6b7280">TCG Credential Activation + ACME device-attest-01 + mTLS</text>
+
+  <!-- ==================== DEVICE SIDE ==================== -->
+  <rect x="20" y="75" width="420" height="380" rx="12" fill="#f0fdf4" stroke="#16a34a" stroke-width="2"/>
+  <text x="230" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#166534">FIELD DEVICE</text>
+
+  <!-- TPM Module -->
+  <rect x="35" y="115" width="190" height="250" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="130" y="138" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#92400e">TPM 2.0</text>
+  <text x="130" y="152" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#78350f">(Hardware Security Module)</text>
+
+  <!-- EK -->
+  <rect x="47" y="165" width="166" height="55" rx="4" fill="#fde68a" stroke="#b45309" stroke-width="1.5"/>
+  <text x="130" y="185" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#78350f">EK (Endorsement Key)</text>
+  <text x="130" y="198" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#92400e">Manufacturer Certified</text>
+  <text x="130" y="210" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#92400e">Decrypt-only | NON-EXPORTABLE</text>
+
+  <!-- AK/LAK in TPM -->
+  <rect x="47" y="228" width="166" height="55" rx="4" fill="#fcd34d" stroke="#b45309" stroke-width="1.5"/>
+  <text x="130" y="248" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#78350f">AK (Attestation Key)</text>
+  <text x="130" y="261" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#92400e">Restricted signing for TPM2_Certify</text>
+  <text x="130" y="273" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#92400e">Bound to EK | NON-EXPORTABLE</text>
+
+  <!-- Agent Key in TPM -->
+  <rect x="47" y="291" width="166" height="65" rx="4" fill="#fed7aa" stroke="#ea580c" stroke-width="1.5"/>
+  <text x="130" y="311" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#c2410c">Agent Key</text>
+  <text x="130" y="324" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#ea580c">Flexible signing (RSA/ECDSA)</text>
+  <text x="130" y="337" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#ea580c">FixedTPM, FixedParent, SensitiveDataOrigin</text>
+  <text x="130" y="349" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#c2410c">Certified by AK | NON-EXPORTABLE</text>
+
+  <!-- Binding arrows inside TPM -->
+  <path d="M 130 220 L 130 228" stroke="#b45309" stroke-width="2" marker-end="url(#arrow-orange)" fill="none"/>
+  <path d="M 130 283 L 130 291" stroke="#ea580c" stroke-width="2" marker-end="url(#arrow-orange)" fill="none"/>
+
+  <!-- Local Storage -->
+  <rect x="240" y="115" width="185" height="250" rx="8" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="332" y="138" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#166534">Secure Storage</text>
+  <text x="332" y="150" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#6b7280">/etc/da/da.json</text>
+
+  <rect x="252" y="162" width="161" height="38" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+  <text x="332" y="179" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#1e40af">Server SPKI Pin</text>
+  <text x="332" y="192" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#3b82f6">sha256//... (TOFU)</text>
+
+  <rect x="252" y="206" width="161" height="38" rx="4" fill="#dcfce7" stroke="#059669" stroke-width="1"/>
+  <text x="332" y="223" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#047857">LAK Certificate</text>
+  <text x="332" y="236" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#059669">X.509, pki-ak CA</text>
+
+  <rect x="252" y="250" width="161" height="50" rx="4" fill="#ffedd5" stroke="#ea580c" stroke-width="1"/>
+  <text x="332" y="267" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#c2410c">Agent Certificate</text>
+  <text x="332" y="280" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#ea580c">+ TPM Key Blobs (priv/pub)</text>
+  <text x="332" y="293" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#f97316">loadable only in same TPM</text>
+
+  <rect x="252" y="306" width="161" height="50" rx="4" fill="#f3e8ff" stroke="#7c3aed" stroke-width="1"/>
+  <text x="332" y="323" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#6d28d9">Usage Certificates</text>
+  <text x="332" y="336" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#7c3aed">+ Standard RSA Keys</text>
+  <text x="332" y="349" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#8b5cf6">Ephemeral, NOT TPM-bound</text>
+
+  <!-- Client tools -->
+  <rect x="35" y="375" width="390" height="70" rx="6" fill="#e0f2fe" stroke="#0284c7" stroke-width="1"/>
+  <text x="230" y="395" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" font-weight="bold" fill="#0369a1">Client Tools</text>
+  <text x="72" y="420" text-anchor="middle" font-family="monospace" font-size="9" fill="#374151">da-init</text>
+  <text x="72" y="432" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#6b7280">TOFU</text>
+  <text x="145" y="420" text-anchor="middle" font-family="monospace" font-size="9" fill="#374151">da-lak</text>
+  <text x="145" y="432" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#6b7280">TCG</text>
+  <text x="230" y="420" text-anchor="middle" font-family="monospace" font-size="9" fill="#374151">da-agent</text>
+  <text x="230" y="432" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#6b7280">ACME</text>
+  <text x="315" y="420" text-anchor="middle" font-family="monospace" font-size="9" fill="#374151">da-gen</text>
+  <text x="315" y="432" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#6b7280">mTLS</text>
+  <text x="388" y="420" text-anchor="middle" font-family="monospace" font-size="9" fill="#374151">da-fingerprint</text>
+  <text x="388" y="432" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#6b7280">EK hash</text>
+
+  <!-- ==================== SERVER SIDE ==================== -->
+  <rect x="560" y="75" width="420" height="380" rx="12" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+  <text x="770" y="100" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#1e40af">SERVER INFRASTRUCTURE</text>
+
+  <!-- gRPC Server -->
+  <rect x="575" y="115" width="185" height="170" rx="8" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="667" y="138" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#1e40af">gRPC Server</text>
+  <text x="667" y="152" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#6b7280">port 50051 + Web 8443</text>
+
+  <rect x="587" y="162" width="161" height="25" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+  <text x="667" y="179" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#1e40af">EK Fingerprint Registry</text>
+
+  <rect x="587" y="193" width="161" height="25" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+  <text x="667" y="210" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#1e40af">MakeCredential Logic</text>
+
+  <rect x="587" y="224" width="161" height="25" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+  <text x="667" y="241" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#1e40af">ACME Proxy (attestation)</text>
+
+  <rect x="587" y="255" width="161" height="25" rx="4" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/>
+  <text x="667" y="272" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#1e40af">mTLS Certificate Service</text>
+
+  <!-- OpenBao PKI -->
+  <rect x="775" y="115" width="190" height="240" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="870" y="138" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#6d28d9">OpenBao PKI</text>
+  <text x="870" y="152" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#6b7280">port 8200</text>
+
+  <rect x="787" y="162" width="166" height="40" rx="4" fill="#f3e8ff" stroke="#7c3aed" stroke-width="1"/>
+  <text x="870" y="179" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#6d28d9">pki-ak (Privacy CA)</text>
+  <text x="870" y="193" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#7c3aed">LAK certs, 1 year validity</text>
+
+  <rect x="787" y="208" width="166" height="40" rx="4" fill="#ede9fe" stroke="#8b5cf6" stroke-width="1"/>
+  <text x="870" y="225" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#6d28d9">pki-agent (ACME)</text>
+  <text x="870" y="239" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#7c3aed">Agent certs, device-attest-01</text>
+
+  <rect x="787" y="254" width="166" height="40" rx="4" fill="#e0e7ff" stroke="#6366f1" stroke-width="1"/>
+  <text x="870" y="271" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#4f46e5">pki-usage</text>
+  <text x="870" y="285" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#6366f1">VPN/WiFi/TLS certs, 1 day</text>
+
+  <rect x="787" y="300" width="166" height="45" rx="4" fill="#fdf4ff" stroke="#d946ef" stroke-width="1"/>
+  <text x="870" y="317" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#a21caf">pki-grpc</text>
+  <text x="870" y="330" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#c026d3">Server TLS certificate</text>
+  <text x="870" y="341" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#c026d3">(SPKI pin source)</text>
+
+  <!-- Server DB -->
+  <rect x="575" y="295" width="185" height="60" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1"/>
+  <text x="667" y="315" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#92400e">SQLite Database</text>
+  <text x="667" y="330" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#b45309">Devices, ACME orders, Audit log</text>
+  <text x="667" y="343" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#b45309">Manufacturer CAs (/ca)</text>
+
+  <!-- Straight network connection lines -->
+  <line x1="440" y1="200" x2="560" y2="200" stroke="#2563eb" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="500" y="192" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#2563eb">gRPC/TLS</text>
+  <text x="500" y="212" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#3b82f6">(SPKI pinned)</text>
+
+  <line x1="440" y1="280" x2="560" y2="280" stroke="#059669" stroke-width="2"/>
+  <text x="500" y="272" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" fill="#059669">mTLS</text>
+  <text x="500" y="292" text-anchor="middle" font-family="Arial, sans-serif" font-size="8" fill="#16a34a">(Agent cert)</text>
+
+  <!-- ==================== PHASE 0a: FINGERPRINT (CLIENT) ==================== -->
+  <rect x="20" y="475" width="145" height="145" rx="10" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+  <circle cx="40" cy="495" r="14" fill="#0284c7"/>
+  <text x="40" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#fff">0a</text>
+  <text x="95" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#0369a1">FINGERPRINT</text>
+  <text x="90" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#374151" font-style="italic">da-fingerprint</text>
+
+  <line x1="28" y1="525" x2="137" y2="525" stroke="#7dd3fc" stroke-width="1"/>
+  <text x="32" y="540" font-family="Arial, sans-serif" font-size="7" fill="#0369a1">1. Read EK from TPM</text>
+  <text x="32" y="553" font-family="Arial, sans-serif" font-size="7" fill="#0369a1">2. SHA256(EK pub)</text>
+  <text x="32" y="566" font-family="Arial, sans-serif" font-size="7" fill="#0369a1">3. Base64 encode</text>
+  <text x="32" y="579" font-family="Arial, sans-serif" font-size="7" fill="#0369a1">4. Display permanent-id</text>
+  <text x="32" y="592" font-family="Arial, sans-serif" font-size="7" fill="#0369a1">5. Give to admin</text>
+
+  <rect x="28" y="603" width="117" height="12" rx="2" fill="#bae6fd"/>
+  <text x="86" y="612" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#0369a1">EK fingerprint</text>
+
+  <!-- ==================== PHASE 0b: PRE-APPROVAL (ADMIN/SERVER) ==================== -->
+  <rect x="180" y="475" width="145" height="145" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <circle cx="200" cy="495" r="14" fill="#d97706"/>
+  <text x="200" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#fff">0b</text>
+  <text x="255" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#92400e">PRE-APPROVE</text>
+  <text x="250" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#374151" font-style="italic">Admin Web UI</text>
+
+  <line x1="188" y1="525" x2="297" y2="525" stroke="#fcd34d" stroke-width="1"/>
+  <text x="192" y="540" font-family="Arial, sans-serif" font-size="7" fill="#92400e">1. Add device (Web UI)</text>
+  <text x="192" y="553" font-family="Arial, sans-serif" font-size="7" fill="#92400e">2. Paste fingerprint</text>
+  <text x="192" y="566" font-family="Arial, sans-serif" font-size="7" fill="#92400e">3. Status: "provisioned"</text>
+  <text x="192" y="579" font-family="Arial, sans-serif" font-size="7" fill="#92400e">4. Ship device to user</text>
+  <text x="192" y="592" font-family="Arial, sans-serif" font-size="7" fill="#92400e"> </text>
+
+  <rect x="188" y="603" width="117" height="12" rx="2" fill="#fde68a"/>
+  <text x="246" y="612" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#92400e">Device approved</text>
+
+  <!-- ==================== STEP 1: PROVISIONING ==================== -->
+  <rect x="340" y="475" width="145" height="145" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <circle cx="360" cy="495" r="14" fill="#2563eb"/>
+  <text x="360" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#fff">1</text>
+  <text x="415" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#1e40af">PROVISION</text>
+  <text x="410" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#374151" font-style="italic">da-init (TOFU)</text>
+
+  <line x1="348" y1="525" x2="457" y2="525" stroke="#93c5fd" stroke-width="1"/>
+  <text x="352" y="540" font-family="Arial, sans-serif" font-size="7" fill="#1e40af">1. TLS connect</text>
+  <text x="352" y="553" font-family="Arial, sans-serif" font-size="7" fill="#1e40af">2. Verify SPKI pin</text>
+  <text x="352" y="566" font-family="Arial, sans-serif" font-size="7" fill="#1e40af">3. Capture server CA</text>
+  <text x="352" y="579" font-family="Arial, sans-serif" font-size="7" fill="#1e40af">4. Check approval</text>
+  <text x="352" y="592" font-family="Arial, sans-serif" font-size="7" fill="#1e40af">5. Persist da.json</text>
+
+  <rect x="348" y="603" width="117" height="12" rx="2" fill="#bfdbfe"/>
+  <text x="406" y="612" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#1e40af">Server pinned</text>
+
+  <!-- ==================== STEP 2: LAK ==================== -->
+  <rect x="500" y="475" width="145" height="145" rx="10" fill="#dcfce7" stroke="#059669" stroke-width="2"/>
+  <circle cx="520" cy="495" r="14" fill="#059669"/>
+  <text x="520" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#fff">2</text>
+  <text x="575" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#047857">LAK</text>
+  <text x="570" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#374151" font-style="italic">da-lak (TCG)</text>
+
+  <line x1="508" y1="525" x2="617" y2="525" stroke="#86efac" stroke-width="1"/>
+  <text x="512" y="540" font-family="Arial, sans-serif" font-size="7" fill="#047857">1. Create AK in TPM</text>
+  <text x="512" y="553" font-family="Arial, sans-serif" font-size="7" fill="#047857">2. Send EK + AK pub</text>
+  <text x="512" y="566" font-family="Arial, sans-serif" font-size="7" fill="#047857">3. MakeCredential</text>
+  <text x="512" y="579" font-family="Arial, sans-serif" font-size="7" fill="#047857">4. ActivateCredential</text>
+  <text x="512" y="592" font-family="Arial, sans-serif" font-size="7" fill="#047857">5. Get LAK cert</text>
+
+  <rect x="508" y="603" width="117" height="12" rx="2" fill="#bbf7d0"/>
+  <text x="566" y="612" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#047857">AK bound to EK</text>
+
+  <!-- ==================== STEP 3: ACME AGENT ==================== -->
+  <rect x="660" y="475" width="145" height="145" rx="10" fill="#ffedd5" stroke="#ea580c" stroke-width="2"/>
+  <circle cx="680" cy="495" r="14" fill="#ea580c"/>
+  <text x="680" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#fff">3</text>
+  <text x="735" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#c2410c">AGENT</text>
+  <text x="730" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#374151" font-style="italic">da-agent (ACME)</text>
+
+  <line x1="668" y1="525" x2="777" y2="525" stroke="#fdba74" stroke-width="1"/>
+  <text x="672" y="540" font-family="Arial, sans-serif" font-size="7" fill="#c2410c">1. Create Agent Key</text>
+  <text x="672" y="553" font-family="Arial, sans-serif" font-size="7" fill="#c2410c">2. ACME newOrder</text>
+  <text x="672" y="566" font-family="Arial, sans-serif" font-size="7" fill="#c2410c">3. TPM2_Certify</text>
+  <text x="672" y="579" font-family="Arial, sans-serif" font-size="7" fill="#c2410c">4. device-attest-01</text>
+  <text x="672" y="592" font-family="Arial, sans-serif" font-size="7" fill="#c2410c">5. Get Agent cert</text>
+
+  <rect x="668" y="603" width="117" height="12" rx="2" fill="#fed7aa"/>
+  <text x="726" y="612" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#c2410c">TPM-bound + attested</text>
+
+  <!-- ==================== STEP 4: USAGE CERT ==================== -->
+  <rect x="820" y="475" width="160" height="145" rx="10" fill="#f3e8ff" stroke="#7c3aed" stroke-width="2"/>
+  <circle cx="840" cy="495" r="14" fill="#7c3aed"/>
+  <text x="840" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#fff">4</text>
+  <text x="905" y="500" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" font-weight="bold" fill="#6d28d9">USAGE CERT</text>
+  <text x="900" y="515" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#374151" font-style="italic">da-gen (mTLS)</text>
+
+  <line x1="828" y1="525" x2="952" y2="525" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="832" y="540" font-family="Arial, sans-serif" font-size="7" fill="#6d28d9">1. Gen RSA key (software)</text>
+  <text x="832" y="553" font-family="Arial, sans-serif" font-size="7" fill="#6d28d9">2. mTLS with Agent cert</text>
+  <text x="832" y="566" font-family="Arial, sans-serif" font-size="7" fill="#6d28d9">3. Request: vpn, wifi, tls</text>
+  <text x="832" y="579" font-family="Arial, sans-serif" font-size="7" fill="#6d28d9">4. Server verifies chain</text>
+  <text x="832" y="592" font-family="Arial, sans-serif" font-size="7" fill="#6d28d9">5. Issue cert (1 day TTL)</text>
+
+  <rect x="828" y="603" width="130" height="12" rx="2" fill="#e9d5ff"/>
+  <text x="893" y="612" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" font-weight="bold" fill="#6d28d9">Ephemeral, NOT TPM</text>
+
+  <!-- Flow arrows between steps -->
+  <path d="M 165 555 L 180 555" stroke="#374151" stroke-width="2" marker-end="url(#arrow)" fill="none"/>
+  <path d="M 325 555 L 340 555" stroke="#374151" stroke-width="2" marker-end="url(#arrow)" fill="none"/>
+  <path d="M 485 555 L 500 555" stroke="#374151" stroke-width="2" marker-end="url(#arrow)" fill="none"/>
+  <path d="M 645 555 L 660 555" stroke="#374151" stroke-width="2" marker-end="url(#arrow)" fill="none"/>
+  <path d="M 805 555 L 820 555" stroke="#374151" stroke-width="2" marker-end="url(#arrow)" fill="none"/>
+
+  <!-- ==================== TRUST CHAIN VISUALIZATION ==================== -->
+  <rect x="20" y="640" width="965" height="90" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="500" y="662" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" font-weight="bold" fill="#334155">Cryptographic Trust Chain</text>
+
+  <!-- TPM EK (Root) -->
+  <rect x="35" y="678" width="115" height="45" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="92" y="696" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#92400e">TPM EK</text>
+  <text x="92" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#78350f">Hardware Root</text>
+  <text x="92" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#a16207">Manufacturer Cert</text>
+
+  <!-- Arrow EK -> AK -->
+  <path d="M 150 700 L 175 700" stroke="#d97706" stroke-width="2" marker-end="url(#arrow-orange)" fill="none"/>
+  <text x="162" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#d97706">binds</text>
+
+  <!-- AK -->
+  <rect x="175" y="678" width="115" height="45" rx="6" fill="#dcfce7" stroke="#059669" stroke-width="2"/>
+  <text x="232" y="696" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#047857">AK/LAK</text>
+  <text x="232" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#059669">TPM-bound</text>
+  <text x="232" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#16a34a">MakeCredential</text>
+
+  <!-- Arrow AK -> Agent Key -->
+  <path d="M 290 700 L 315 700" stroke="#059669" stroke-width="2" marker-end="url(#arrow-green)" fill="none"/>
+  <text x="302" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#059669">certifies</text>
+
+  <!-- Agent Key -->
+  <rect x="315" y="678" width="115" height="45" rx="6" fill="#ffedd5" stroke="#ea580c" stroke-width="2"/>
+  <text x="372" y="696" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#c2410c">Agent Key</text>
+  <text x="372" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#ea580c">TPM-bound</text>
+  <text x="372" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#f97316">TPM2_Certify</text>
+
+  <!-- Arrow Agent Key -> ACME -->
+  <path d="M 430 700 L 455 700" stroke="#ea580c" stroke-width="2" marker-end="url(#arrow-orange)" fill="none"/>
+  <text x="442" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#ea580c">attests</text>
+
+  <!-- ACME Verification -->
+  <rect x="455" y="678" width="115" height="45" rx="6" fill="#e0e7ff" stroke="#6366f1" stroke-width="2"/>
+  <text x="512" y="696" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#4f46e5">ACME</text>
+  <text x="512" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#6366f1">device-attest-01</text>
+  <text x="512" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#818cf8">verifies chain</text>
+
+  <!-- Arrow ACME -> Agent Cert -->
+  <path d="M 570 700 L 595 700" stroke="#6366f1" stroke-width="2" marker-end="url(#arrow-purple)" fill="none"/>
+  <text x="582" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#6366f1">issues</text>
+
+  <!-- Agent Cert -->
+  <rect x="595" y="678" width="115" height="45" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="652" y="696" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#1e40af">Agent Cert</text>
+  <text x="652" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#2563eb">mTLS identity</text>
+  <text x="652" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#3b82f6">PKI signed</text>
+
+  <!-- Arrow Agent Cert -> mTLS -->
+  <path d="M 710 700 L 735 700" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)" fill="none"/>
+  <text x="722" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#2563eb">mTLS</text>
+
+  <!-- mTLS Auth -->
+  <rect x="735" y="678" width="105" height="45" rx="6" fill="#ecfdf5" stroke="#10b981" stroke-width="2"/>
+  <text x="787" y="696" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#059669">Server</text>
+  <text x="787" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#10b981">Auth OK</text>
+  <text x="787" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#34d399">chain verified</text>
+
+  <!-- Arrow mTLS -> Usage -->
+  <path d="M 840 700 L 865 700" stroke="#10b981" stroke-width="2" marker-end="url(#arrow-green)" fill="none"/>
+  <text x="852" y="692" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#10b981">issues</text>
+
+  <!-- Usage Certs -->
+  <rect x="865" y="678" width="105" height="45" rx="6" fill="#f3e8ff" stroke="#7c3aed" stroke-width="2"/>
+  <text x="917" y="696" text-anchor="middle" font-family="Arial, sans-serif" font-size="9" font-weight="bold" fill="#6d28d9">Usage Cert</text>
+  <text x="917" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="7" fill="#7c3aed">VPN/WiFi/TLS</text>
+  <text x="917" y="720" text-anchor="middle" font-family="Arial, sans-serif" font-size="6" fill="#8b5cf6">Short-lived</text>
+
+  <!-- ==================== SECURITY PROPERTIES ==================== -->
+  <rect x="20" y="745" width="480" height="145" rx="8" fill="#fef2f2" stroke="#dc2626" stroke-width="1"/>
+  <text x="260" y="768" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#dc2626">Security Properties</text>
+
+  <text x="40" y="790" font-family="Arial, sans-serif" font-size="9" fill="#991b1b" font-weight="bold">Hardware-Bound Keys (Non-Exportable):</text>
+  <text x="40" y="805" font-family="Arial, sans-serif" font-size="8" fill="#991b1b">• EK: Decrypt-only, manufacturer certified</text>
+  <text x="40" y="818" font-family="Arial, sans-serif" font-size="8" fill="#991b1b">• AK: Restricted signing, bound to EK via MakeCredential</text>
+  <text x="40" y="831" font-family="Arial, sans-serif" font-size="8" fill="#991b1b">• Agent Key: FixedTPM, FixedParent, SensitiveDataOrigin</text>
+
+  <text x="40" y="850" font-family="Arial, sans-serif" font-size="9" fill="#991b1b" font-weight="bold">Attestation Chain:</text>
+  <text x="40" y="865" font-family="Arial, sans-serif" font-size="8" fill="#991b1b">• TPM2_Certify proves Agent Key attributes + binding to AK</text>
+  <text x="40" y="878" font-family="Arial, sans-serif" font-size="8" fill="#991b1b">• ACME device-attest-01 verifies full chain: EK→AK→Agent</text>
+
+  <!-- ==================== ATTESTATION FLOW ==================== -->
+  <rect x="510" y="745" width="475" height="145" rx="8" fill="#ecfdf5" stroke="#059669" stroke-width="1"/>
+  <text x="747" y="768" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#047857">ACME device-attest-01 Flow (Step 3)</text>
+
+  <text x="530" y="790" font-family="Arial, sans-serif" font-size="8" fill="#065f46">1. Client: TPM2_Create(Agent Key) → flexible signing, FixedTPM</text>
+  <text x="530" y="805" font-family="Arial, sans-serif" font-size="8" fill="#065f46">2. Client: TPM2_Certify(AgentKey, AK, extraData=SHA256(token.thumbprint))</text>
+  <text x="530" y="820" font-family="Arial, sans-serif" font-size="8" fill="#065f46">3. Client: Build WebAuthn TPM attestation object (fmt="tpm")</text>
+  <text x="530" y="835" font-family="Arial, sans-serif" font-size="8" fill="#065f46">4. Server: Validate LAK cert chain (pki-ak CA)</text>
+  <text x="530" y="850" font-family="Arial, sans-serif" font-size="8" fill="#065f46">5. Server: Verify TPM2_Certify signature with AK public key</text>
+  <text x="530" y="865" font-family="Arial, sans-serif" font-size="8" fill="#065f46">6. Server: Check key attributes (FixedTPM, SensitiveDataOrigin)</text>
+  <text x="530" y="880" font-family="Arial, sans-serif" font-size="8" fill="#065f46">7. ACME: Issue Agent certificate for CSR signed by Agent Key</text>
+</svg>

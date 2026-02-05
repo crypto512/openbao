@@ -25,19 +25,15 @@
                 </div>
             </div>
         </form>
-    </div>
-
-    <!-- Auto-Approve Toggle -->
-    <div class="card">
-        <label class="toggle">
-            <input type="checkbox" id="auto-approve"
-                   onchange="toggleAutoApprove(this.checked)"
-                   {{if .AutoApprove}}checked{{end}}>
-            <span>Auto-approve new devices</span>
-        </label>
-        <p style="font-size: 0.875rem; color: var(--gray-500); margin-top: 8px;">
-            When enabled, devices are automatically provisioned without manual approval.
-        </p>
+        <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--gray-200); display: flex; align-items: center; gap: 12px;">
+            <label class="toggle" style="margin: 0;">
+                <input type="checkbox" id="auto-approve"
+                       onchange="toggleAutoApprove(this.checked)"
+                       {{if .AutoApprove}}checked{{end}}>
+                <span style="font-size: 0.8rem;">Auto-approve new devices</span>
+            </label>
+            <span style="font-size: 0.75rem; color: var(--gray-500);">Automatically provision without manual approval</span>
+        </div>
     </div>
     <script>
     function toggleAutoApprove(enabled) {

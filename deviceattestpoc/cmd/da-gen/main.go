@@ -34,7 +34,8 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("Error: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -60,21 +61,19 @@ func run() error {
 		return fmt.Errorf("server not configured. Run da-init first")
 	}
 
-	log.Printf("da-gen: Certificate Generation (mTLS)")
-	log.Printf("Usage: %s", *usage)
-	log.Printf("Server: %s", serverAddr)
-	log.Printf("TPM: %s", finalTPMDevice)
-	log.Printf("Output: %s", finalOutputDir)
+	fmt.Fprintf(os.Stderr, "── Phase 3: mTLS Certificate Issuance ───────────────────────\n")
+	fmt.Fprintf(os.Stderr, "  Usage: %s\n", *usage)
+	log.Printf("Server: %s, TPM: %s, Output: %s", serverAddr, finalTPMDevice, finalOutputDir)
 
 	// Self-healing: check and refresh LAK/agent if needed
 	if !IsLAKValid() {
-		log.Printf("LAK certificate expired or invalid, refreshing...")
+		fmt.Fprintf(os.Stderr, "  LAK expired, refreshing...\n")
 		if err := RunTool("da-lak"); err != nil {
 			return fmt.Errorf("failed to refresh LAK: %w", err)
 		}
 	}
 	if !IsAgentValid() {
-		log.Printf("Agent certificate expired or invalid, refreshing...")
+		fmt.Fprintf(os.Stderr, "  Agent cert expired, refreshing...\n")
 		if err := RunTool("da-agent"); err != nil {
 			return fmt.Errorf("failed to refresh agent: %w", err)
 		}
@@ -94,7 +93,7 @@ func run() error {
 	log.Printf("Permanent ID: %s", permanentID)
 
 	// Generate standard RSA key (not TPM-bound)
-	log.Printf("Generating RSA key...")
+	fmt.Fprintf(os.Stderr, "  Generating RSA key + CSR...\n")
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate RSA key: %w", err)
@@ -104,7 +103,6 @@ func run() error {
 	commonName := fmt.Sprintf("%s-%s", *usage, permanentID)
 
 	// Generate CSR signed by the RSA key
-	log.Printf("Generating CSR...")
 	csrTemplate := &x509.CertificateRequest{
 		Subject: pkix.Name{
 			CommonName: commonName,
@@ -128,14 +126,14 @@ func run() error {
 	}
 
 	// Connect to server via mTLS using agent cert and stored CA
-	log.Printf("Connecting to server with mTLS...")
+	fmt.Fprintf(os.Stderr, "  Authenticating via mTLS (TPM-bound agent cert)...\n")
 	creds, agentKey, err := NewMTLSCredentialsWithTPMFromPEM(serverCAPEM, agentCertPEM, agentKeyPriv, agentKeyPub, tpmClient)
 	if err != nil {
 		return fmt.Errorf("failed to create mTLS credentials: %w", err)
 	}
 	defer tpmClient.CloseCertKey(agentKey)
 
-	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient("passthrough:///"+serverAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
@@ -146,7 +144,7 @@ func run() error {
 	defer cancel()
 
 	// Call IssueCertificate RPC (mTLS-protected, no ACME)
-	log.Printf("Requesting certificate via mTLS...")
+	fmt.Fprintf(os.Stderr, "  Requesting certificate...\n")
 	resp, err := client.IssueCertificate(ctx, &pb.IssueCertRequest{
 		Usage:      *usage,
 		CsrPem:     csrPEM,
@@ -185,12 +183,12 @@ func run() error {
 		return fmt.Errorf("failed to write certificate: %w", err)
 	}
 
-	log.Printf("Certificate generated successfully!")
-	log.Printf("  Key: %s", keyPath)
-	log.Printf("  Cert: %s", certPath)
-	log.Printf("  CN: %s", commonName)
+	fmt.Fprintf(os.Stderr, "  Certificate issued:\n")
+	fmt.Fprintf(os.Stderr, "    Key:  %s\n", keyPath)
+	fmt.Fprintf(os.Stderr, "    Cert: %s\n", certPath)
+	fmt.Fprintf(os.Stderr, "    CN:   %s\n", commonName)
 	if resp.NotBefore != "" && resp.NotAfter != "" {
-		log.Printf("  Valid: %s to %s", resp.NotBefore, resp.NotAfter)
+		fmt.Fprintf(os.Stderr, "    Valid: %s to %s\n", resp.NotBefore, resp.NotAfter)
 	}
 	return nil
 }

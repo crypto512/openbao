@@ -1,70 +1,34 @@
 {{define "status_panel.html"}}
-<h2>Server Status</h2>
-
 <!-- SPKI Pin -->
-<div style="margin-bottom: 20px;">
-    <label style="font-size: 0.875rem; font-weight: 500; color: var(--gray-700);">SPKI Pin (for TOFU bootstrap)</label>
+<div style="margin-bottom: 12px;">
+    <label style="font-size: 0.8rem; font-weight: 500; color: var(--gray-700);">SPKI Pin (for TOFU bootstrap)</label>
     <div class="spki-box">
         <code>{{.SPKIPin}}</code>
         <button class="btn btn-secondary btn-sm" onclick="copyToClipboard('{{.SPKIPin}}')">Copy</button>
     </div>
 </div>
 
-<!-- Stats Grid -->
+<!-- Stats Pills -->
 <div class="stats-grid">
     <div class="stat">
-        <div class="stat-value">{{.Status.Total}}</div>
-        <div class="stat-label">Total Devices</div>
+        <span class="stat-value">{{.Status.Total}}</span>
+        <span class="stat-label">Total</span>
     </div>
     <div class="stat {{if gt .Status.Registered 0}}stat-secondary{{end}}">
-        <div class="stat-value">{{.Status.Registered}}</div>
-        <div class="stat-label">Registered</div>
+        <span class="stat-value">{{.Status.Registered}}</span>
+        <span class="stat-label">Registered</span>
     </div>
     <div class="stat {{if gt .Status.Provisioned 0}}stat-warning{{end}}">
-        <div class="stat-value">{{.Status.Provisioned}}</div>
-        <div class="stat-label">Provisioned</div>
+        <span class="stat-value">{{.Status.Provisioned}}</span>
+        <span class="stat-label">Provisioned</span>
     </div>
     <div class="stat {{if gt .Status.Enrolled 0}}stat-info{{end}}">
-        <div class="stat-value">{{.Status.Enrolled}}</div>
-        <div class="stat-label">Enrolled</div>
+        <span class="stat-value">{{.Status.Enrolled}}</span>
+        <span class="stat-label">Enrolled</span>
     </div>
     <div class="stat stat-success">
-        <div class="stat-value">{{.Status.Trusted}}</div>
-        <div class="stat-label">Trusted</div>
-    </div>
-</div>
-
-<!-- Certificate Status -->
-<div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--gray-200);">
-    <h3 style="font-size: 0.875rem; font-weight: 600; color: var(--gray-500); margin-bottom: 12px;">Certificate Status</h3>
-    <div class="stats-grid">
-        <div class="stat {{if gt .Status.ExpiringSoon 0}}stat-warning{{end}}">
-            <div class="stat-value">{{.Status.ExpiringSoon}}</div>
-            <div class="stat-label">Expiring Soon (7d)</div>
-        </div>
-        <div class="stat {{if gt .Status.Expired 0}}stat-danger{{end}}">
-            <div class="stat-value">{{.Status.Expired}}</div>
-            <div class="stat-label">Expired</div>
-        </div>
-    </div>
-</div>
-
-<!-- Today's Activity -->
-<div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--gray-200);">
-    <h3 style="font-size: 0.875rem; font-weight: 600; color: var(--gray-500); margin-bottom: 12px;">Today's Activity</h3>
-    <div class="stats-grid">
-        <div class="stat">
-            <div class="stat-value">{{.Status.EnrollmentsToday}}</div>
-            <div class="stat-label">Provisioned</div>
-        </div>
-        <div class="stat stat-success">
-            <div class="stat-value">{{.Status.CertsIssuedToday}}</div>
-            <div class="stat-label">Certs Issued</div>
-        </div>
-        <div class="stat {{if gt .Status.FailedToday 0}}stat-danger{{end}}">
-            <div class="stat-value">{{.Status.FailedToday}}</div>
-            <div class="stat-label">Failed</div>
-        </div>
+        <span class="stat-value">{{.Status.Trusted}}</span>
+        <span class="stat-label">Trusted</span>
     </div>
 </div>
 {{end}}

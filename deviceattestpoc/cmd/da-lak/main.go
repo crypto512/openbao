@@ -23,7 +23,8 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("Error: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -43,9 +44,8 @@ func run() error {
 		return fmt.Errorf("server not configured. Run da-init first")
 	}
 
-	log.Printf("da-lak: LAK Certificate Provisioning")
-	log.Printf("Server: %s", serverAddr)
-	log.Printf("TPM: %s", finalTPMDevice)
+	fmt.Fprintf(os.Stderr, "── Phase 1: TCG Credential Activation (LAK) ────────────────\n")
+	log.Printf("Server: %s, TPM: %s", serverAddr, finalTPMDevice)
 
 	if *clear {
 		if err := ClearLAKBlobs(); err != nil {
@@ -54,7 +54,7 @@ func run() error {
 		log.Printf("LAK data cleared")
 	}
 
-	// Phase 1: Initialize TPM for enrollment only (no AK creation yet)
+	// Initialize TPM for enrollment only (no AK creation yet)
 	// This allows us to check approval status before heavy TPM operations
 	tpmClient, err := NewTPMClientForEnrollment(finalTPMDevice)
 	if err != nil {
@@ -63,11 +63,10 @@ func run() error {
 	defer tpmClient.Close()
 
 	permanentID := tpmClient.GetPermanentID()
-	log.Printf("Permanent ID: %s", permanentID)
+	fmt.Fprintf(os.Stderr, "  Device ID: %s\n", permanentID)
 
 	if !tpmClient.NeedsLAKProvisioning() {
-		log.Printf("LAK certificate already exists in da.json")
-		log.Printf("Use --clear to re-provision")
+		fmt.Fprintf(os.Stderr, "  LAK certificate already exists (use --clear to re-provision)\n")
 		return nil
 	}
 
@@ -77,7 +76,7 @@ func run() error {
 		return fmt.Errorf("failed to create TLS credentials: %w", err)
 	}
 
-	conn, err := grpc.NewClient(serverAddr, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient("passthrough:///"+serverAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %w", err)
 	}
@@ -87,8 +86,8 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Phase 2: Check enrollment/approval status with server BEFORE creating AK
-	log.Printf("Checking device enrollment status...")
+	// Check enrollment/approval status with server BEFORE creating AK
+	fmt.Fprintf(os.Stderr, "  Enrolling device...\n")
 	enrollResp, err := client.EnrollTPM(ctx, &pb.TPMEnrollmentRequest{
 		EkCertificatePem:  tpmClient.GetEKCertificatePEM(),
 		DeviceDescription: fmt.Sprintf("Device %s", permanentID[:8]),
@@ -99,7 +98,6 @@ func run() error {
 	if enrollResp.Status == "error" {
 		return fmt.Errorf("TPM enrollment failed: %s", enrollResp.Error)
 	}
-	log.Printf("Device status: %s", enrollResp.PermanentIdentifier)
 
 	// Check if device needs approval - exit BEFORE any AK operations
 	if enrollResp.PendingApproval {
@@ -123,14 +121,14 @@ func run() error {
 		os.Exit(2) // Exit code 2 indicates pending approval
 	}
 
-	// Phase 3: Device is approved - now initialize AK (create or load)
-	log.Printf("Device approved, initializing attestation key...")
+	// Device is approved - now initialize AK (create or load)
+	fmt.Fprintf(os.Stderr, "  Creating Attestation Key (AK)...\n")
 	if err := tpmClient.InitializeAK(); err != nil {
 		return fmt.Errorf("failed to initialize AK: %w", err)
 	}
 
-	// Phase 4: Get AK activation data for credential challenge
-	log.Printf("Requesting credential challenge...")
+	// Get AK activation data for credential challenge
+	fmt.Fprintf(os.Stderr, "  MakeCredential challenge...\n")
 	akParams, ekPublic, err := tpmClient.GetAKActivationData()
 	if err != nil {
 		return fmt.Errorf("failed to get AK activation data: %w", err)
@@ -149,8 +147,8 @@ func run() error {
 		return fmt.Errorf("credential challenge failed: %s", provisionResp.Error)
 	}
 
-	// Activate credential
-	log.Printf("Activating credential...")
+	// Activate credential - proves AK and EK are in the same TPM
+	fmt.Fprintf(os.Stderr, "  ActivateCredential (proving AK-EK binding)...\n")
 	decryptedSecret, err := tpmClient.ActivateCredentialChallenge(provisionResp.EncryptedCredential)
 	if err != nil {
 		return fmt.Errorf("TPM ActivateCredential failed: %w", err)
@@ -172,9 +170,6 @@ func run() error {
 		return fmt.Errorf("failed to store LAK certificate: %w", err)
 	}
 
-	log.Printf("LAK certificate provisioned successfully")
-	log.Printf("  Valid from: %s", activateResp.NotBefore)
-	log.Printf("  Valid until: %s", activateResp.NotAfter)
-	log.Printf("  Saved to: %s", GetDAConfigPath())
+	fmt.Fprintf(os.Stderr, "  LAK certificate issued (valid: %s to %s)\n", activateResp.NotBefore, activateResp.NotAfter)
 	return nil
 }

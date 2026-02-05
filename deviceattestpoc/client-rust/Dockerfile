@@ -1,5 +1,5 @@
 # Build stage - Rust client for device attestation
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 WORKDIR /build
 
@@ -30,7 +30,7 @@ RUN git clone --depth 1 --branch 4.1.3 https://github.com/tpm2-software/tpm2-tss
     rm -rf /tmp/tpm2-tss
 
 # Layer 1: Create workspace and copy dependency files (for caching)
-COPY client-rust/Cargo.toml ./client-rust/
+COPY client-rust/Cargo.toml client-rust/Cargo.lock ./client-rust/
 COPY client-rust/da-common/Cargo.toml ./client-rust/da-common/
 COPY client-rust/dar-fingerprint/Cargo.toml ./client-rust/dar-fingerprint/
 COPY client-rust/dar-init/Cargo.toml ./client-rust/dar-init/

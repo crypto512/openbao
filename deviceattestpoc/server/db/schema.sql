@@ -122,5 +122,5 @@ CREATE TABLE IF NOT EXISTS acme_accounts (
 CREATE INDEX IF NOT EXISTS idx_acme_accounts_pki_path ON acme_accounts(pki_path);
 
 -- Initialize default settings
-INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_approve', 'true');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_approve', 'false');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('server_spki', '');
